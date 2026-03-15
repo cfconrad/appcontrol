@@ -1,0 +1,815 @@
+mod config;
+mod db;
+mod notify;
+mod proc;
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use notify::notify;
+use rusqlite::Connection;
+
+use clap::{Args, Parser, Subcommand};
+use db::ActiveProcess;
+
+type ProcessKey = (u32, i64); // (pid, start_epoch)
+
+#[derive(Parser)]
+#[command(name = "appmon", about = "Application activity monitor")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    /// Directory where appmon.db and appmon_config.db are stored.
+    /// Overridden by the DATA_DIR environment variable.
+    #[arg(long, env = "DATA_DIR", default_value = ".")]
+    data_dir: std::path::PathBuf,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the monitoring daemon (default)
+    Serve(ServeArgs),
+    /// Manage monitor configuration
+    Config(ConfigArgs),
+    /// Inspect tracked processes
+    Proc(ProcArgs),
+    /// Manage usage rules
+    Rules(RulesArgs),
+}
+
+#[derive(Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    subcommand: ConfigCommand,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Show the current whitelist
+    Show,
+    /// Edit the whitelist in $EDITOR
+    Edit,
+}
+
+#[derive(Args)]
+struct ProcArgs {
+    #[command(subcommand)]
+    subcommand: ProcCommand,
+}
+
+#[derive(Subcommand)]
+enum ProcCommand {
+    /// List processes
+    List(ListArgs),
+}
+
+#[derive(Args)]
+struct ListArgs {
+    #[command(subcommand)]
+    subcommand: ListCommand,
+}
+
+#[derive(Subcommand)]
+enum ListCommand {
+    /// List all currently tracked processes
+    Current,
+    /// Show all processes tracked today with cumulative run time
+    Today,
+}
+
+#[derive(Args)]
+struct RulesArgs {
+    #[command(subcommand)]
+    subcommand: RulesCommand,
+}
+
+#[derive(Subcommand)]
+enum RulesCommand {
+    /// List all rules
+    Show,
+    /// Edit rules in $EDITOR
+    Edit,
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before epoch")
+        .as_secs() as i64
+}
+
+fn get_config_path() -> String {
+    std::env::var("APPMON_CONFIG_DB").unwrap_or_else(|_| "appmon_config.db".to_string())
+}
+
+fn get_data_path() -> String {
+    std::env::var("APPMON_DB").unwrap_or_else(|_| "appmon.db".to_string())
+}
+
+fn window_start_for_reset(now: i64, reset_behavior: &str) -> i64 {
+    use chrono::{Datelike, TimeZone, Utc};
+    let dt = Utc.timestamp_opt(now, 0).single().expect("invalid timestamp");
+    let start = match reset_behavior {
+        "daily" => dt.date_naive().and_hms_opt(0, 0, 0).unwrap(),
+        "weekly" => {
+            let monday = dt.date_naive()
+                - chrono::Duration::days(dt.weekday().num_days_from_monday() as i64);
+            monday.and_hms_opt(0, 0, 0).unwrap()
+        }
+        "monthly" => dt.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap(),
+        _ => dt.date_naive().and_hms_opt(0, 0, 0).unwrap(),
+    };
+    start.and_utc().timestamp()
+}
+
+/// Returns one entry per rule group that *newly* became exceeded this call:
+/// `(group_name, total_secs, limit_mins, reset_behavior)`.
+fn check_limit_rules(
+    data_conn: &Connection,
+    rules: &[config::Rule],
+    whitelist_entries: &[config::WhitelistEntry],
+    now: i64,
+    limit_exceeded: &mut HashMap<String, bool>,
+) -> Vec<(String, i64, i64, String)> {
+    let mut newly_exceeded: Vec<(String, i64, i64, String)> = Vec::new();
+
+    for rule in rules {
+        let window_start = window_start_for_reset(now, &rule.reset_behavior);
+
+        let group_patterns: Vec<regex::Regex> = whitelist_entries
+            .iter()
+            .filter(|e| e.enabled && e.group_name == rule.group_name)
+            .filter_map(|e| regex::Regex::new(&e.pattern).ok())
+            .collect();
+        if group_patterns.is_empty() {
+            continue;
+        }
+
+        let records = match db::list_processes_active_today(data_conn, window_start, now) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("appmon: error querying window for rule {:?}: {e}", rule.group_name);
+                continue;
+            }
+        };
+
+        let mut total_secs: i64 = 0;
+        for r in &records {
+            if group_patterns.iter().any(|re| re.is_match(&r.name)) {
+                let effective_start = r.start_time.max(window_start);
+                let effective_end = r.end_time.unwrap_or(now).min(now);
+                total_secs += (effective_end - effective_start).max(0);
+            }
+        }
+
+        let limit_secs = rule.limit * 60;
+        let was_exceeded = *limit_exceeded.get(&rule.group_name).unwrap_or(&false);
+        let is_exceeded = total_secs > limit_secs;
+
+        if is_exceeded && !was_exceeded {
+            eprintln!(
+                "appmon: limit exceeded group={} used={} limit={} ({})",
+                rule.group_name,
+                format_duration(total_secs),
+                format_limit(rule.limit),
+                rule.reset_behavior,
+            );
+            newly_exceeded.push((
+                rule.group_name.clone(),
+                total_secs,
+                rule.limit,
+                rule.reset_behavior.clone(),
+            ));
+        } else if !is_exceeded && was_exceeded {
+            eprintln!(
+                "appmon: limit no longer exceeded group={} used={} limit={} ({})",
+                rule.group_name,
+                format_duration(total_secs),
+                format_limit(rule.limit),
+                rule.reset_behavior,
+            );
+        }
+        limit_exceeded.insert(rule.group_name.clone(), is_exceeded);
+    }
+
+    newly_exceeded
+}
+
+fn cmd_serve(data_dir: &std::path::Path) {
+    let config_path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+    let data_path   = data_dir.join("appmon.db").to_string_lossy().into_owned();
+
+    let config_conn = config::open_config_db(&config_path)
+        .unwrap_or_else(|e| panic!("cannot open config DB {config_path:?}: {e}"));
+    let data_conn = db::open_db(&data_path)
+        .unwrap_or_else(|e| panic!("cannot open data DB {data_path:?}: {e}"));
+
+    let boot_time = proc::read_boot_time()
+        .unwrap_or_else(|e| panic!("cannot read boot time: {e}"));
+    let clk_tck = proc::get_clk_tck();
+
+    let boot_id = db::get_or_create_boot_session(&data_conn, boot_time)
+        .unwrap_or_else(|e| panic!("cannot register boot session: {e}"));
+
+    eprintln!("appmon: boot_id={boot_id}, boot_time={boot_time}, clk_tck={clk_tck}");
+
+    let running = Arc::new(AtomicBool::new(true));
+    let r = Arc::clone(&running);
+    ctrlc::set_handler(move || {
+        eprintln!("appmon: shutting down…");
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("cannot install signal handler");
+
+    let mut whitelist = config::load_whitelist(&config_conn);
+    let mut whitelist_entries = config::list_whitelist_entries(&config_conn)
+        .unwrap_or_else(|e| { eprintln!("appmon: cannot load whitelist entries: {e}"); vec![] });
+    let mut rules = config::list_rules(&config_conn)
+        .unwrap_or_else(|e| { eprintln!("appmon: cannot load rules: {e}"); vec![] });
+    let mut limit_exceeded: HashMap<String, bool> = HashMap::new();
+    let mut active: HashMap<ProcessKey, ActiveProcess> = HashMap::new();
+
+    // Initial scan
+    for snap in proc::enumerate_processes(boot_time, clk_tck) {
+        if !whitelist.matches(snap.uid, &snap.name) {
+            continue;
+        }
+        let key = (snap.pid, snap.start_epoch);
+        match db::insert_process(&data_conn, boot_id, &snap) {
+            Ok(db_id) => {
+                active.insert(
+                    key,
+                    ActiveProcess {
+                        db_id,
+                        start_epoch: snap.start_epoch,
+                    },
+                );
+            }
+            Err(e) => eprintln!("appmon: insert error for pid {}: {e}", snap.pid),
+        }
+    }
+
+    eprintln!("appmon: tracking {} already-running processes", active.len());
+
+    let mut tick: u64 = 0;
+    while running.load(Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        tick += 1;
+        let now = now_secs();
+
+        // Reload whitelist, entries, and rules every 30 seconds
+        if tick % 30 == 0 {
+            whitelist = config::load_whitelist(&config_conn);
+            whitelist_entries = config::list_whitelist_entries(&config_conn)
+                .unwrap_or_else(|e| { eprintln!("appmon: cannot reload whitelist entries: {e}"); vec![] });
+            rules = config::list_rules(&config_conn)
+                .unwrap_or_else(|e| { eprintln!("appmon: cannot reload rules: {e}"); vec![] });
+        }
+
+        // Check limit rules every 60 seconds
+        let newly_exceeded = if tick % 60 == 0 {
+            check_limit_rules(&data_conn, &rules, &whitelist_entries, now, &mut limit_exceeded)
+        } else {
+            vec![]
+        };
+
+        // Build current set
+        let snapshots = proc::enumerate_processes(boot_time, clk_tck);
+        let current: HashMap<ProcessKey, proc::ProcSnapshot> = snapshots
+            .into_iter()
+            .filter(|s| whitelist.matches(s.uid, &s.name))
+            .map(|s| ((s.pid, s.start_epoch), s))
+            .collect();
+
+        // Notify affected users for each newly exceeded group.
+        // One notification per uid — pick the first matching live process for the pid.
+        for (group_name, total_secs, limit_mins, reset) in &newly_exceeded {
+            let patterns: Vec<regex::Regex> = whitelist_entries
+                .iter()
+                .filter(|e| e.enabled && e.group_name == *group_name)
+                .filter_map(|e| regex::Regex::new(&e.pattern).ok())
+                .collect();
+
+            let mut notified_uids = std::collections::HashSet::new();
+            for ((pid, _), snap) in &current {
+                if patterns.iter().any(|re| re.is_match(&snap.name))
+                    && notified_uids.insert(snap.uid)
+                {
+                    let msg = format!(
+                        "Usage limit reached for \"{}\".\n\
+                         You have used {} of your {} {} allowance.",
+                        group_name,
+                        format_duration(*total_secs),
+                        format_limit(*limit_mins),
+                        reset,
+                    );
+                    notify(snap.uid, *pid, &msg);
+                }
+            }
+        }
+
+        // Departed processes
+        let departed: Vec<ProcessKey> = active
+            .keys()
+            .filter(|k| !current.contains_key(*k))
+            .copied()
+            .collect();
+        for key in departed {
+            let ap = active.remove(&key).unwrap();
+            let duration = now - ap.start_epoch;
+            if let Err(e) = db::finalize_process(&data_conn, ap.db_id, now, duration) {
+                eprintln!("appmon: finalize error for db_id {}: {e}", ap.db_id);
+            }
+        }
+
+        // Arrived processes
+        for (key, snap) in &current {
+            if active.contains_key(key) {
+                continue;
+            }
+            match db::insert_process(&data_conn, boot_id, snap) {
+                Ok(db_id) => {
+                    active.insert(
+                        *key,
+                        ActiveProcess {
+                            db_id,
+                            start_epoch: snap.start_epoch,
+                        },
+                    );
+                }
+                Err(e) => eprintln!("appmon: insert error for pid {}: {e}", snap.pid),
+            }
+        }
+    }
+
+    // Finalize all remaining active processes on shutdown
+    let now = now_secs();
+    for (_key, ap) in active {
+        let duration = now - ap.start_epoch;
+        if let Err(e) = db::finalize_process(&data_conn, ap.db_id, now, duration) {
+            eprintln!("appmon: shutdown finalize error for db_id {}: {e}", ap.db_id);
+        }
+    }
+
+    eprintln!("appmon: done.");
+}
+
+fn cmd_config_show() {
+    let path = get_config_path();
+    let conn = config::open_config_db(&path)
+        .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
+    let entries = config::list_whitelist_entries(&conn)
+        .unwrap_or_else(|e| panic!("cannot read whitelist: {e}"));
+
+    if entries.is_empty() {
+        println!("whitelist is empty");
+        return;
+    }
+
+    println!("{:<4}  {:<7}  {:<16}  {:<16}  pattern", "id", "enabled", "user", "group");
+    println!("{}", "-".repeat(72));
+    for e in &entries {
+        let user = e.uid.map_or("*".to_string(), |u| {
+            proc::uid_to_username(u).unwrap_or_else(|| u.to_string())
+        });
+        println!(
+            "{:<4}  {:<7}  {:<16}  {:<16}  {}",
+            e.id,
+            if e.enabled { "yes" } else { "no" },
+            user,
+            e.group_name,
+            e.pattern
+        );
+    }
+}
+
+fn cmd_config_edit() {
+    let path = get_config_path();
+    let conn = config::open_config_db(&path)
+        .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
+
+    let entries = config::list_whitelist_entries(&conn)
+        .unwrap_or_else(|e| panic!("cannot read whitelist: {e}"));
+
+    let tmp_path = "/tmp/appmon_whitelist_edit.txt";
+
+    let mut content = String::from(
+        "# appmon whitelist — one entry per line: user group pattern\n\
+         # user    : username, numeric UID, or * to match any user\n\
+         # group   : application group name (no spaces)\n\
+         # pattern : regex matched against the process name\n\
+         # Lines starting with '#' are ignored\n\n",
+    );
+    for e in &entries {
+        let user = e.uid.map_or("*".to_string(), |u| {
+            proc::uid_to_username(u).unwrap_or_else(|| u.to_string())
+        });
+        if e.enabled {
+            content.push_str(&format!("{} {} {}", user, e.group_name, e.pattern));
+        } else {
+            content.push_str(&format!("# (disabled) {} {} {}", user, e.group_name, e.pattern));
+        }
+        content.push('\n');
+    }
+
+    std::fs::write(tmp_path, &content)
+        .unwrap_or_else(|e| panic!("cannot write temp file: {e}"));
+
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let status = std::process::Command::new(&editor)
+        .arg(tmp_path)
+        .status()
+        .unwrap_or_else(|e| panic!("cannot launch editor '{editor}': {e}"));
+
+    if !status.success() {
+        eprintln!("appmon: editor exited with non-zero status, aborting");
+        std::process::exit(1);
+    }
+
+    let edited = std::fs::read_to_string(tmp_path)
+        .unwrap_or_else(|e| panic!("cannot read temp file: {e}"));
+
+    let mut valid_patterns: Vec<config::WhitelistPattern> = Vec::new();
+    for line in edited.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Format: user group pattern  (3 space-separated fields)
+        let mut fields = line.splitn(3, char::is_whitespace);
+        let user_part = match fields.next() {
+            Some(f) => f,
+            None => continue,
+        };
+        let group_part = match fields.next() {
+            Some(f) => f,
+            None => {
+                eprintln!("appmon: skipping malformed entry (expected: user group pattern): {line:?}");
+                continue;
+            }
+        };
+        let pat = match fields.next().map(str::trim) {
+            Some(f) if !f.is_empty() => f,
+            _ => {
+                eprintln!("appmon: skipping malformed entry (expected: user group pattern): {line:?}");
+                continue;
+            }
+        };
+        let uid: Option<u32> = if user_part == "*" {
+            None
+        } else if let Ok(u) = user_part.parse::<u32>() {
+            Some(u)
+        } else if let Some(u) = proc::username_to_uid(user_part) {
+            Some(u)
+        } else {
+            eprintln!("appmon: skipping entry with unknown user {user_part:?}: {line:?}");
+            continue;
+        };
+        match regex::Regex::new(pat) {
+            Ok(_) => valid_patterns.push(config::WhitelistPattern {
+                uid,
+                group_name: group_part.to_string(),
+                pattern: pat.to_string(),
+            }),
+            Err(e) => eprintln!("appmon: skipping invalid regex {pat:?}: {e}"),
+        }
+    }
+
+    config::set_whitelist_patterns(&conn, &valid_patterns)
+        .unwrap_or_else(|e| panic!("cannot update whitelist: {e}"));
+
+    println!("appmon: whitelist updated ({} pattern(s))", valid_patterns.len());
+
+    let _ = std::fs::remove_file(tmp_path);
+}
+
+fn format_duration(secs: i64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+fn cmd_proc_list_today() {
+    let path = get_data_path();
+    let conn = db::open_db(&path)
+        .unwrap_or_else(|e| panic!("cannot open data DB {path:?}: {e}"));
+
+    let now = now_secs();
+    let today_start = now - (now % 86400);
+
+    let records = db::list_processes_active_today(&conn, today_start, now)
+        .unwrap_or_else(|e| panic!("cannot read processes: {e}"));
+
+    if records.is_empty() {
+        println!("no processes tracked today");
+        return;
+    }
+
+    // Accumulate effective duration per process name within today's window
+    let mut totals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for r in &records {
+        let effective_start = r.start_time.max(today_start);
+        let effective_end = r.end_time.unwrap_or(now).min(now);
+        let duration = (effective_end - effective_start).max(0);
+        *totals.entry(r.name.clone()).or_insert(0) += duration;
+    }
+
+    let mut rows: Vec<(String, i64)> = totals.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+
+    println!("{:<20}  total time", "name");
+    println!("{}", "-".repeat(34));
+    for (name, secs) in &rows {
+        println!("{:<20}  {}", name, format_duration(*secs));
+    }
+}
+
+fn cmd_proc_list() {
+    let data_path = get_data_path();
+    let config_path = get_config_path();
+
+    let data_conn = db::open_db(&data_path)
+        .unwrap_or_else(|e| panic!("cannot open data DB {data_path:?}: {e}"));
+    let config_conn = config::open_config_db(&config_path)
+        .unwrap_or_else(|e| panic!("cannot open config DB {config_path:?}: {e}"));
+
+    let records = db::list_active_processes(&data_conn)
+        .unwrap_or_else(|e| panic!("cannot read processes: {e}"));
+
+    if records.is_empty() {
+        println!("no tracked processes");
+        return;
+    }
+
+    let now = now_secs();
+
+    let whitelist_entries = config::list_whitelist_entries(&config_conn)
+        .unwrap_or_else(|e| { eprintln!("appmon: cannot load whitelist entries: {e}"); vec![] });
+    let rules = config::list_rules(&config_conn)
+        .unwrap_or_else(|e| { eprintln!("appmon: cannot load rules: {e}"); vec![] });
+
+    // Compute used seconds per rule group within its reset window.
+    // group_name -> (used_secs, limit_mins)
+    let mut group_usage: HashMap<String, (i64, i64)> = HashMap::new();
+    for rule in &rules {
+        let window_start = window_start_for_reset(now, &rule.reset_behavior);
+        let patterns: Vec<regex::Regex> = whitelist_entries
+            .iter()
+            .filter(|e| e.enabled && e.group_name == rule.group_name)
+            .filter_map(|e| regex::Regex::new(&e.pattern).ok())
+            .collect();
+        if patterns.is_empty() {
+            continue;
+        }
+        let today_records = db::list_processes_active_today(&data_conn, window_start, now)
+            .unwrap_or_default();
+        let mut total_secs: i64 = 0;
+        for tr in &today_records {
+            if patterns.iter().any(|re| re.is_match(&tr.name)) {
+                let effective_start = tr.start_time.max(window_start);
+                let effective_end = tr.end_time.unwrap_or(now).min(now);
+                total_secs += (effective_end - effective_start).max(0);
+            }
+        }
+        group_usage.insert(rule.group_name.clone(), (total_secs, rule.limit));
+    }
+
+    // Compiled patterns for matching a process name to its group.
+    let name_to_group: Vec<(regex::Regex, String)> = whitelist_entries
+        .iter()
+        .filter(|e| e.enabled && !e.group_name.is_empty())
+        .filter_map(|e| regex::Regex::new(&e.pattern).ok().map(|re| (re, e.group_name.clone())))
+        .collect();
+
+    println!(
+        "{:<6}  {:<6}  {:<12}  {:<9}  {:<14}  {:<9}  {:<9}  cmdline",
+        "db_id", "pid", "name", "running", "group", "used", "left",
+    );
+    println!("{}", "-".repeat(96));
+    for r in &records {
+        let running = format_duration(now - r.start_time);
+
+        let group = name_to_group
+            .iter()
+            .find(|(re, _)| re.is_match(&r.name))
+            .map(|(_, g)| g.as_str())
+            .unwrap_or("-");
+
+        let (used_str, left_str) = match group_usage.get(group) {
+            Some((used_secs, limit_mins)) => {
+                let limit_secs = limit_mins * 60;
+                let left_secs = limit_secs - used_secs;
+                let left = if left_secs <= 0 {
+                    "OVER".to_string()
+                } else {
+                    format_duration(left_secs)
+                };
+                (format_duration(*used_secs), left)
+            }
+            None => ("-".to_string(), "-".to_string()),
+        };
+
+        let cmdline = if r.cmdline.len() > 30 {
+            format!("{}…", &r.cmdline[..29])
+        } else {
+            r.cmdline.clone()
+        };
+        println!(
+            "{:<6}  {:<6}  {:<12}  {:<9}  {:<14}  {:<9}  {:<9}  {}",
+            r.id, r.pid, r.name, running, group, used_str, left_str, cmdline,
+        );
+    }
+}
+
+fn parse_limit(s: &str) -> Result<i64, String> {
+    let mut total: i64 = 0;
+    for term in s.split('+') {
+        let term = term.trim();
+        if term.is_empty() {
+            continue;
+        }
+        if let Some(h) = term.strip_suffix('h') {
+            let hours: i64 = h.trim().parse().map_err(|_| format!("invalid hours value: {h:?}"))?;
+            total += hours * 60;
+        } else if let Some(m) = term.strip_suffix('m') {
+            let mins: i64 = m.trim().parse().map_err(|_| format!("invalid minutes value: {m:?}"))?;
+            total += mins;
+        } else {
+            let mins: i64 = term.parse().map_err(|_| format!("invalid limit value: {term:?}"))?;
+            total += mins;
+        }
+    }
+    if total <= 0 {
+        return Err(format!("limit must be greater than zero, got {total}"));
+    }
+    Ok(total)
+}
+
+fn format_limit(minutes: i64) -> String {
+    let h = minutes / 60;
+    let m = minutes % 60;
+    match (h, m) {
+        (0, _) => format!("{m}m"),
+        (_, 0) => format!("{h}h"),
+        _ => format!("{h}h+{m}m"),
+    }
+}
+
+fn cmd_rules_show() {
+    let path = get_config_path();
+    let conn = config::open_config_db(&path)
+        .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
+    let rules = config::list_rules(&conn)
+        .unwrap_or_else(|e| panic!("cannot read rules: {e}"));
+
+    if rules.is_empty() {
+        println!("no rules defined");
+        return;
+    }
+
+    println!("{:<4}  {:<20}  {:<10}  limit", "id", "group", "reset");
+    println!("{}", "-".repeat(50));
+    for r in &rules {
+        println!(
+            "{:<4}  {:<20}  {:<10}  {}",
+            r.id,
+            r.group_name,
+            r.reset_behavior,
+            format_limit(r.limit),
+        );
+    }
+}
+
+fn cmd_rules_edit() {
+    let path = get_config_path();
+    let conn = config::open_config_db(&path)
+        .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
+    let rules = config::list_rules(&conn)
+        .unwrap_or_else(|e| panic!("cannot read rules: {e}"));
+
+    let tmp_path = "/tmp/appmon_rules_edit.txt";
+
+    let mut content = String::from(
+        "# appmon rules — one entry per line: group reset limit\n\
+         # group : application group name (matches whitelist group column)\n\
+         # reset : daily | weekly | monthly\n\
+         # limit : minutes, e.g. 90  1h  30m  1h+30m\n\
+         # Lines starting with '#' are ignored\n\n",
+    );
+    for r in &rules {
+        content.push_str(&format!(
+            "{} {} {}\n",
+            r.group_name,
+            r.reset_behavior,
+            format_limit(r.limit),
+        ));
+    }
+
+    std::fs::write(tmp_path, &content)
+        .unwrap_or_else(|e| panic!("cannot write temp file: {e}"));
+
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let status = std::process::Command::new(&editor)
+        .arg(tmp_path)
+        .status()
+        .unwrap_or_else(|e| panic!("cannot launch editor '{editor}': {e}"));
+
+    if !status.success() {
+        eprintln!("appmon: editor exited with non-zero status, aborting");
+        std::process::exit(1);
+    }
+
+    let edited = std::fs::read_to_string(tmp_path)
+        .unwrap_or_else(|e| panic!("cannot read temp file: {e}"));
+
+    let mut valid_rules: Vec<config::Rule> = Vec::new();
+    for line in edited.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Format: group reset limit  (3 space-separated fields)
+        let mut fields = line.splitn(3, char::is_whitespace);
+        let group = match fields.next() {
+            Some(f) => f.trim(),
+            None => continue,
+        };
+        let reset = match fields.next() {
+            Some(f) => f.trim(),
+            None => {
+                eprintln!("appmon: skipping malformed rule (expected: group reset limit): {line:?}");
+                continue;
+            }
+        };
+        let limit_str = match fields.next().map(str::trim) {
+            Some(f) if !f.is_empty() => f,
+            _ => {
+                eprintln!("appmon: skipping malformed rule (expected: group reset limit): {line:?}");
+                continue;
+            }
+        };
+        if !matches!(reset, "daily" | "weekly" | "monthly") {
+            eprintln!("appmon: skipping rule with invalid reset {reset:?} (expected daily/weekly/monthly): {line:?}");
+            continue;
+        }
+        let limit = match parse_limit(limit_str) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("appmon: skipping rule with invalid limit {limit_str:?}: {e}");
+                continue;
+            }
+        };
+        valid_rules.push(config::Rule {
+            id: 0, // assigned by DB
+            group_name: group.to_string(),
+            reset_behavior: reset.to_string(),
+            limit,
+        });
+    }
+
+    config::set_rules(&conn, &valid_rules)
+        .unwrap_or_else(|e| panic!("cannot update rules: {e}"));
+
+    println!("appmon: rules updated ({} rule(s))", valid_rules.len());
+
+    let _ = std::fs::remove_file(tmp_path);
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    match cli.command.unwrap_or_else(|| Command::Serve(ServeArgs {
+        data_dir: std::path::PathBuf::from(
+            std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string()),
+        ),
+    })) {
+        Command::Serve(args) => cmd_serve(&args.data_dir),
+        Command::Config(args) => match args.subcommand {
+            ConfigCommand::Show => cmd_config_show(),
+            ConfigCommand::Edit => cmd_config_edit(),
+        },
+        Command::Proc(args) => match args.subcommand {
+            ProcCommand::List(list_args) => match list_args.subcommand {
+                ListCommand::Current => cmd_proc_list(),
+                ListCommand::Today => cmd_proc_list_today(),
+            },
+        },
+        Command::Rules(args) => match args.subcommand {
+            RulesCommand::Show => cmd_rules_show(),
+            RulesCommand::Edit => cmd_rules_edit(),
+        },
+    }
+}

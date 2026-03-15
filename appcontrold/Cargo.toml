@@ -1,0 +1,12 @@
+[package]
+name = "appcontrold"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+libc     = "0.2"
+ctrlc    = { version = "3.4", features = ["termination"] }
+regex    = "1"
+clap     = { version = "4", features = ["derive", "env"] }
+chrono   = "0.4"

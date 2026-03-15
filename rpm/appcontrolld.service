@@ -1,0 +1,15 @@
+[Unit]
+Description=AppControl daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/appcontrold serve
+User=root
+Group=root
+Restart=on-failure
+StateDirectory=root
+StateDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
