@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
+use log;
 
 /// Number of times a uid can click "Ok" before only "Close Application" remains.
 const WARN_LIMIT: u32 = 3;
@@ -46,6 +47,7 @@ fn is_process_running(pid: u32) -> bool {
 
 fn run_notify_loop(uid: u32, pid: u32, message: String) {
     loop {
+        log::debug!("Run notif_looop for uid:{} pid:{}", uid, pid);
         if !is_process_running(pid) {
             break;
         }
@@ -81,7 +83,7 @@ fn run_notify_loop(uid: u32, pid: u32, message: String) {
 }
 
 /// Spawn a `zenity` dialog as the target user on their display.
-fn show_dialog(uid: u32, message: &str, only_close: bool) -> DialogResult {
+fn show_dialog(uid: u32, message: &str) -> DialogResult {
     let env = match find_user_display_env(uid) {
         Some(e) => e,
         None => {
@@ -92,7 +94,7 @@ fn show_dialog(uid: u32, message: &str, only_close: bool) -> DialogResult {
 
     let gid = get_user_gid(uid).unwrap_or(uid);
 
-    let mut cmd = std::process::Command::new("zenity");
+    let mut cmd = std::process::Command::new("xpopup");
     cmd.env_clear();
 
     // Forward only the vars zenity needs.
@@ -116,27 +118,9 @@ fn show_dialog(uid: u32, message: &str, only_close: bool) -> DialogResult {
         }
     }
 
-    if only_close {
-        // Single-button warning — the only action is "Close Application".
-        cmd.args([
-            "--warning",
-            "--title=AppMon \u{2014} Final Warning",
-            &format!("--text={message}"),
-            "--ok-label=Close Application",
-            "--width=450",
-        ]);
-    } else {
-        // Two-button question dialog.
-        // zenity exits 0 for OK, non-zero for Cancel.
-        cmd.args([
-            "--question",
-            "--title=AppMon \u{2014} Usage Limit Reached",
-            &format!("--text={message}"),
-            "--ok-label=Ok",
-            "--cancel-label=Close Application",
-            "--width=450",
-        ]);
-    }
+    cmd.args([
+        message.to_string(),
+    ]);
 
     // Drop privileges to the target user so X11/Wayland auth works.
     use std::os::unix::process::CommandExt;
@@ -148,10 +132,7 @@ fn show_dialog(uid: u32, message: &str, only_close: bool) -> DialogResult {
             DialogResult::Failed
         }
         Ok(status) => {
-            if only_close {
-                // The only button was "Close Application".
-                DialogResult::CloseApplication
-            } else if status.success() {
+            if status.success() {
                 DialogResult::Ok
             } else {
                 DialogResult::CloseApplication

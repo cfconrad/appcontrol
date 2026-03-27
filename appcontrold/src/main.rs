@@ -13,6 +13,7 @@ use rusqlite::Connection;
 
 use clap::{Args, Parser, Subcommand};
 use db::ActiveProcess;
+use log::{debug, error, info, log_enabled, warn, Level};
 
 type ProcessKey = (u32, i64); // (pid, start_epoch)
 
@@ -240,6 +241,7 @@ fn cmd_serve(data_dir: &std::path::Path) {
         if !whitelist.matches(snap.uid, &snap.name) {
             continue;
         }
+        log::debug!("handle process: {}", snap.name);
         let key = (snap.pid, snap.start_epoch);
         match db::insert_process(&data_conn, boot_id, &snap) {
             Ok(db_id) => {
@@ -790,7 +792,10 @@ fn cmd_rules_edit() {
 
 fn main() {
     let cli = Cli::parse();
-
+    env_logger::init();
+    debug!("debug");
+    info!("info");
+    warn!("warn");
     match cli.command.unwrap_or_else(|| Command::Serve(ServeArgs {
         data_dir: std::path::PathBuf::from(
             std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string()),
