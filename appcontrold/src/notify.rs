@@ -64,7 +64,7 @@ fn run_notify_loop(uid: u32, pid: u32, message: String) {
             break;
         }
 
-        match show_dialog(uid, &message, false) {
+        match show_dialog(uid, &message) {
             DialogResult::CloseApplication => {
                 kill_processe(pid);
                 COUNTS.lock().unwrap().remove(&uid);
@@ -82,7 +82,7 @@ fn run_notify_loop(uid: u32, pid: u32, message: String) {
     }
 }
 
-/// Spawn a `zenity` dialog as the target user on their display.
+/// Spawn a popup dialog as the target user on their display using the xpopup library.
 fn show_dialog(uid: u32, message: &str) -> DialogResult {
     let env = match find_user_display_env(uid) {
         Some(e) => e,
@@ -94,48 +94,58 @@ fn show_dialog(uid: u32, message: &str) -> DialogResult {
 
     let gid = get_user_gid(uid).unwrap_or(uid);
 
-    let mut cmd = std::process::Command::new("xpopup");
-    cmd.env_clear();
-
-    // Forward only the vars zenity needs.
-    for key in &[
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "LANG",
-        "LC_ALL",
-        "DISPLAY",
-        "WAYLAND_DISPLAY",
-        "XAUTHORITY",
-        "DBUS_SESSION_BUS_ADDRESS",
-        "XDG_RUNTIME_DIR",
-        "XDG_SESSION_TYPE",
-    ] {
-        if let Some(val) = env.get(*key) {
-            cmd.env(key, val);
+    unsafe {
+        let pid = libc::fork();
+        if pid < 0 {
+            eprintln!("appmon notify: fork failed");
+            return DialogResult::Failed;
         }
-    }
 
-    cmd.args([
-        message.to_string(),
-    ]);
+        if pid == 0 {
+            // Child process: Drop privileges and run the popup
+            
+            // Clear current env to avoid leaking daemon env (like APPMON_DB)
+            let keys: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+            for k in keys {
+                std::env::remove_var(k);
+            }
 
-    // Drop privileges to the target user so X11/Wayland auth works.
-    use std::os::unix::process::CommandExt;
-    cmd.uid(uid).gid(gid);
+            // Set environment variables for the user session
+            for (key, val) in &env {
+                std::env::set_var(key, val);
+            }
 
-    match cmd.status() {
-        Err(e) => {
-            eprintln!("appmon notify: failed to launch zenity: {e}");
-            DialogResult::Failed
-        }
-        Ok(status) => {
-            if status.success() {
-                DialogResult::Ok
+            // Drop privileges
+            if libc::setresgid(gid, gid, gid) != 0 {
+                libc::_exit(1);
+            }
+            if libc::setresuid(uid, uid, uid) != 0 {
+                libc::_exit(1);
+            }
+
+            // Call the xpopup library function
+            xpopup::run_popup(message.to_string(), None);
+            
+            // Should not be reached as run_popup calls process::exit
+            libc::_exit(0);
+        } else {
+            // Parent process: wait for the child
+            let mut status = 0;
+            libc::waitpid(pid, &mut status, 0);
+
+            if libc::WIFEXITED(status) {
+                let exit_code = libc::WEXITSTATUS(status);
+                match exit_code {
+                    0 => DialogResult::Ok,
+                    2 => DialogResult::CloseApplication,
+                    _ => {
+                        eprintln!("appmon notify: xpopup exited with code {exit_code}");
+                        DialogResult::Failed
+                    }
+                }
             } else {
-                DialogResult::CloseApplication
+                eprintln!("appmon notify: xpopup terminated abnormally");
+                DialogResult::Failed
             }
         }
     }

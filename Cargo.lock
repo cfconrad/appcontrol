@@ -282,6 +282,7 @@ dependencies = [
  "log",
  "regex",
  "rusqlite",
+ "xpopup",
 ]
 
 [[package]]
