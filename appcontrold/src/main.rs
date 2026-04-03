@@ -11,15 +11,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use notify::notify;
 use rusqlite::Connection;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use db::ActiveProcess;
-use log::{debug, error, info, log_enabled, warn, Level};
+use log::{debug, error};
 
 type ProcessKey = (u32, i64); // (pid, start_epoch)
+
+#[derive(Clone, ValueEnum)]
+enum LogLevel {
+    Warn,
+    Info,
+    Debug,
+}
 
 #[derive(Parser)]
 #[command(name = "appmon", about = "Application activity monitor")]
 struct Cli {
+    /// Set log level (warn, info, debug)
+    #[arg(long, value_enum, default_value = "warn")]
+    log_level: LogLevel,
+    /// Enable debug log level (shorthand for --log-level debug)
+    #[arg(short = 'd')]
+    debug: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -129,16 +142,23 @@ fn window_start_for_reset(now: i64, reset_behavior: &str) -> i64 {
     start.and_utc().timestamp()
 }
 
-/// Returns one entry per rule group that *newly* became exceeded this call:
-/// `(group_name, total_secs, limit_mins, reset_behavior)`.
+struct ExceededGroup {
+    group_name: String,
+    total_secs: i64,
+    limit_mins: i64,
+    reset_behavior: String,
+    /// Per-app usage within the window, sorted by descending duration.
+    app_usage: Vec<(String, i64)>,
+}
+
+/// Returns one entry per rule group that is currently exceeded.
 fn check_limit_rules(
     data_conn: &Connection,
     rules: &[config::Rule],
     whitelist_entries: &[config::WhitelistEntry],
     now: i64,
-    limit_exceeded: &mut HashMap<String, bool>,
-) -> Vec<(String, i64, i64, String)> {
-    let mut newly_exceeded: Vec<(String, i64, i64, String)> = Vec::new();
+) -> Vec<ExceededGroup> {
+    let mut exceeded: Vec<ExceededGroup> = Vec::new();
 
     for rule in rules {
         let window_start = window_start_for_reset(now, &rule.reset_behavior);
@@ -160,46 +180,31 @@ fn check_limit_rules(
             }
         };
 
-        let mut total_secs: i64 = 0;
+        let mut per_app: HashMap<String, i64> = HashMap::new();
         for r in &records {
             if group_patterns.iter().any(|re| re.is_match(&r.name)) {
                 let effective_start = r.start_time.max(window_start);
                 let effective_end = r.end_time.unwrap_or(now).min(now);
-                total_secs += (effective_end - effective_start).max(0);
+                *per_app.entry(r.name.clone()).or_insert(0) +=
+                    (effective_end - effective_start).max(0);
             }
         }
 
-        let limit_secs = rule.limit * 60;
-        let was_exceeded = *limit_exceeded.get(&rule.group_name).unwrap_or(&false);
-        let is_exceeded = total_secs > limit_secs;
-
-        if is_exceeded && !was_exceeded {
-            eprintln!(
-                "appmon: limit exceeded group={} used={} limit={} ({})",
-                rule.group_name,
-                format_duration(total_secs),
-                format_limit(rule.limit),
-                rule.reset_behavior,
-            );
-            newly_exceeded.push((
-                rule.group_name.clone(),
+        let total_secs: i64 = per_app.values().sum();
+        if total_secs > rule.limit * 60 {
+            let mut app_usage: Vec<(String, i64)> = per_app.into_iter().collect();
+            app_usage.sort_by(|a, b| b.1.cmp(&a.1));
+            exceeded.push(ExceededGroup {
+                group_name: rule.group_name.clone(),
                 total_secs,
-                rule.limit,
-                rule.reset_behavior.clone(),
-            ));
-        } else if !is_exceeded && was_exceeded {
-            eprintln!(
-                "appmon: limit no longer exceeded group={} used={} limit={} ({})",
-                rule.group_name,
-                format_duration(total_secs),
-                format_limit(rule.limit),
-                rule.reset_behavior,
-            );
+                limit_mins: rule.limit,
+                reset_behavior: rule.reset_behavior.clone(),
+                app_usage,
+            });
         }
-        limit_exceeded.insert(rule.group_name.clone(), is_exceeded);
     }
 
-    newly_exceeded
+    exceeded
 }
 
 fn cmd_serve(data_dir: &std::path::Path) {
@@ -229,11 +234,6 @@ fn cmd_serve(data_dir: &std::path::Path) {
     .expect("cannot install signal handler");
 
     let mut whitelist = config::load_whitelist(&config_conn);
-    let mut whitelist_entries = config::list_whitelist_entries(&config_conn)
-        .unwrap_or_else(|e| { eprintln!("appmon: cannot load whitelist entries: {e}"); vec![] });
-    let mut rules = config::list_rules(&config_conn)
-        .unwrap_or_else(|e| { eprintln!("appmon: cannot load rules: {e}"); vec![] });
-    let mut limit_exceeded: HashMap<String, bool> = HashMap::new();
     let mut active: HashMap<ProcessKey, ActiveProcess> = HashMap::new();
 
     // Initial scan
@@ -259,27 +259,25 @@ fn cmd_serve(data_dir: &std::path::Path) {
 
     eprintln!("appmon: tracking {} already-running processes", active.len());
 
-    let mut tick: u64 = 0;
+    let mut next = now_secs();
     while running.load(Ordering::SeqCst) {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        tick += 1;
         let now = now_secs();
+        if now < next {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            continue;
+        }
+        next = now + 15;
+        debug!("Looop {} > {}", now, next);
 
         // Reload whitelist, entries, and rules every 30 seconds
-        if tick % 30 == 0 {
-            whitelist = config::load_whitelist(&config_conn);
-            whitelist_entries = config::list_whitelist_entries(&config_conn)
-                .unwrap_or_else(|e| { eprintln!("appmon: cannot reload whitelist entries: {e}"); vec![] });
-            rules = config::list_rules(&config_conn)
-                .unwrap_or_else(|e| { eprintln!("appmon: cannot reload rules: {e}"); vec![] });
-        }
+        whitelist = config::load_whitelist(&config_conn);
+        let whitelist_entries = config::list_whitelist_entries(&config_conn)
+            .unwrap_or_else(|e| { eprintln!("appmon: cannot reload whitelist entries: {e}"); vec![] });
+        let rules = config::list_rules(&config_conn)
+            .unwrap_or_else(|e| { eprintln!("appmon: cannot reload rules: {e}"); vec![] });
 
         // Check limit rules every 60 seconds
-        let newly_exceeded = if tick % 60 == 0 {
-            check_limit_rules(&data_conn, &rules, &whitelist_entries, now, &mut limit_exceeded)
-        } else {
-            vec![]
-        };
+        let exceeded = check_limit_rules(&data_conn, &rules, &whitelist_entries, now);
 
         // Build current set
         let snapshots = proc::enumerate_processes(boot_time, clk_tck);
@@ -289,12 +287,12 @@ fn cmd_serve(data_dir: &std::path::Path) {
             .map(|s| ((s.pid, s.start_epoch), s))
             .collect();
 
-        // Notify affected users for each newly exceeded group.
+        // Notify affected users for each exceeded group.
         // One notification per uid — pick the first matching live process for the pid.
-        for (group_name, total_secs, limit_mins, reset) in &newly_exceeded {
+        for eg in &exceeded {
             let patterns: Vec<regex::Regex> = whitelist_entries
                 .iter()
-                .filter(|e| e.enabled && e.group_name == *group_name)
+                .filter(|e| e.enabled && e.group_name == eg.group_name)
                 .filter_map(|e| regex::Regex::new(&e.pattern).ok())
                 .collect();
 
@@ -303,13 +301,19 @@ fn cmd_serve(data_dir: &std::path::Path) {
                 if patterns.iter().any(|re| re.is_match(&snap.name))
                     && notified_uids.insert(snap.uid)
                 {
+                    let app_used = eg.app_usage
+                        .iter()
+                        .find(|(name, _)| name == &snap.name)
+                        .map(|(_, secs)| *secs)
+                        .unwrap_or(0);
+
                     let msg = format!(
-                        "Usage limit reached for \"{}\".\n\
-                         You have used {} of your {} {} allowance.",
-                        group_name,
-                        format_duration(*total_secs),
-                        format_limit(*limit_mins),
-                        reset,
+                        "# Usage limit reached\n\n\n\
+                         **{}** has used {} of its {} {} allowance.",
+                        snap.name,
+                        format_duration(app_used),
+                        format_limit(eg.limit_mins),
+                        eg.reset_behavior,
                     );
                     notify(snap.uid, *pid, &msg);
                 }
@@ -792,10 +796,16 @@ fn cmd_rules_edit() {
 
 fn main() {
     let cli = Cli::parse();
-    env_logger::init();
-    debug!("debug");
-    info!("info");
-    warn!("warn");
+    let level = if cli.debug {
+        log::LevelFilter::Debug
+    } else {
+        match cli.log_level {
+            LogLevel::Warn  => log::LevelFilter::Warn,
+            LogLevel::Info  => log::LevelFilter::Info,
+            LogLevel::Debug => log::LevelFilter::Debug,
+        }
+    };
+    env_logger::Builder::new().filter_level(level).init();
     match cli.command.unwrap_or_else(|| Command::Serve(ServeArgs {
         data_dir: std::path::PathBuf::from(
             std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string()),

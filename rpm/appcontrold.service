@@ -1,14 +1,13 @@
 [Unit]
 Description=AppControl daemon
-After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/appcontrold serve
+ExecStart=/usr/bin/appcontrold serve --data-dir %S/appcontrold
 User=root
 Group=root
 Restart=on-failure
-StateDirectory=root
+StateDirectory=appcontrold
 StateDirectoryMode=0755
 
 [Install]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 use log;
 
@@ -6,11 +6,15 @@ use log;
 const WARN_LIMIT: u32 = 3;
 
 /// Seconds to wait before re-showing the popup after "Ok" is clicked.
-const REPEAT_SECS: u64 = 60;
+const REPEAT_SECS: u64 = 30;
 
 /// Per-uid notification counts (how many times the popup has been shown).
 static COUNTS: LazyLock<Mutex<HashMap<u32, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// PIDs that currently have an active notification loop.
+static ACTIVE_PIDS: LazyLock<Mutex<HashSet<u32>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Show a notification popup for the given user with the supplied message.
 ///
@@ -46,8 +50,14 @@ fn is_process_running(pid: u32) -> bool {
 }
 
 fn run_notify_loop(uid: u32, pid: u32, message: String) {
+    // Ensure only one notification loop runs per PID.
+    if !ACTIVE_PIDS.lock().unwrap().insert(pid) {
+        log::warn!("notify: loop already active for pid {pid}, skipping");
+        return;
+    }
+
     loop {
-        log::debug!("Run notif_looop for uid:{} pid:{}", uid, pid);
+        log::debug!("notify: loop for uid:{} pid:{}", uid, pid);
         if !is_process_running(pid) {
             break;
         }
@@ -59,12 +69,9 @@ fn run_notify_loop(uid: u32, pid: u32, message: String) {
             *c
         };
 
-        if count >= WARN_LIMIT {
-            kill_processe(pid);
-            break;
-        }
+        let warn_only = count >= WARN_LIMIT;
 
-        match show_dialog(uid, &message) {
+        match show_dialog(uid, &message, warn_only) {
             DialogResult::CloseApplication => {
                 kill_processe(pid);
                 COUNTS.lock().unwrap().remove(&uid);
@@ -80,10 +87,12 @@ fn run_notify_loop(uid: u32, pid: u32, message: String) {
             }
         }
     }
+
+    ACTIVE_PIDS.lock().unwrap().remove(&pid);
 }
 
 /// Spawn a popup dialog as the target user on their display using the xpopup library.
-fn show_dialog(uid: u32, message: &str) -> DialogResult {
+fn show_dialog(uid: u32, message: &str, warn_only: bool) -> DialogResult {
     let env = match find_user_display_env(uid) {
         Some(e) => e,
         None => {
@@ -103,7 +112,7 @@ fn show_dialog(uid: u32, message: &str) -> DialogResult {
 
         if pid == 0 {
             // Child process: Drop privileges and run the popup
-            
+
             // Clear current env to avoid leaking daemon env (like APPMON_DB)
             let keys: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
             for k in keys {
@@ -124,8 +133,8 @@ fn show_dialog(uid: u32, message: &str) -> DialogResult {
             }
 
             // Call the xpopup library function
-            xpopup::run_popup(message.to_string(), None);
-            
+            xpopup::run_popup(message.to_string(), None, warn_only);
+
             // Should not be reached as run_popup calls process::exit
             libc::_exit(0);
         } else {
