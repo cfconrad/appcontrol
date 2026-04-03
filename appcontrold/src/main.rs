@@ -81,6 +81,19 @@ struct ProcArgs {
 enum ProcCommand {
     /// List processes
     List(ListArgs),
+    /// Show all database entries for a named application
+    Show(ProcShowArgs),
+}
+
+#[derive(Args)]
+struct ProcShowArgs {
+    /// Application name to look up
+    name: String,
+    /// Only show entries started within this duration ago.
+    /// Accepts a number followed by: s (seconds), d (days), w (weeks), m (months), y (years).
+    /// Example: 7d, 2w, 3m, 1y
+    #[arg(long)]
+    duration: Option<String>,
 }
 
 #[derive(Args)]
@@ -540,6 +553,60 @@ fn cmd_proc_list_today() {
     }
 }
 
+fn cmd_proc_show(name: &str, duration: Option<&str>) {
+    use chrono::{DateTime, Utc};
+
+    let since: Option<i64> = match duration {
+        Some(d) => {
+            let secs = parse_duration_secs(d)
+                .unwrap_or_else(|e| { eprintln!("appmon: {e}"); std::process::exit(1); });
+            Some(now_secs() - secs)
+        }
+        None => None,
+    };
+
+    let path = get_data_path();
+    let conn = db::open_db(&path)
+        .unwrap_or_else(|e| panic!("cannot open data DB {path:?}: {e}"));
+
+    let records = db::list_entries_by_name(&conn, name, since)
+        .unwrap_or_else(|e| panic!("cannot read entries: {e}"));
+
+    if records.is_empty() {
+        println!("no entries found for {name:?}");
+        return;
+    }
+
+    println!(
+        "{:<6}  {:<6}  {:<16}  {:<20}  {:<20}  {:<9}  cmdline",
+        "db_id", "pid", "user", "start", "end", "duration",
+    );
+    println!("{}", "-".repeat(108));
+    for r in &records {
+        let fmt = |ts: i64| {
+            DateTime::<Utc>::from_timestamp(ts, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| ts.to_string())
+        };
+        let user = proc::uid_to_username(r.uid)
+            .unwrap_or_else(|| r.uid.to_string());
+        let start = fmt(r.start_time);
+        let end = r.end_time.map(fmt).unwrap_or_else(|| "running".to_string());
+        let duration = r.duration_seconds
+            .map(format_duration)
+            .unwrap_or_else(|| "-".to_string());
+        let cmdline = if r.cmdline.len() > 30 {
+            format!("{}…", &r.cmdline[..29])
+        } else {
+            r.cmdline.clone()
+        };
+        println!(
+            "{:<6}  {:<6}  {:<16}  {:<20}  {:<20}  {:<9}  {}",
+            r.id, r.pid, user, start, end, duration, cmdline,
+        );
+    }
+}
+
 fn cmd_proc_list() {
     let data_path = get_data_path();
     let config_path = get_config_path();
@@ -635,6 +702,27 @@ fn cmd_proc_list() {
             r.id, r.pid, r.name, running, group, used_str, left_str, cmdline,
         );
     }
+}
+
+/// Parse a duration string such as `7d`, `2w`, `30s`, `3m`, `1y` into seconds.
+fn parse_duration_secs(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    let (num_part, suffix) = s
+        .find(|c: char| !c.is_ascii_digit())
+        .map(|i| s.split_at(i))
+        .unwrap_or((s, "s"));
+    let n: i64 = num_part
+        .parse()
+        .map_err(|_| format!("invalid number in duration {s:?}"))?;
+    let secs = match suffix {
+        "s" | "" => n,
+        "d"      => n * 86_400,
+        "w"      => n * 7 * 86_400,
+        "m"      => n * 30 * 86_400,
+        "y"      => n * 365 * 86_400,
+        other    => return Err(format!("unknown duration unit {other:?} (use s/d/w/m/y)")),
+    };
+    Ok(secs)
 }
 
 fn parse_limit(s: &str) -> Result<i64, String> {
@@ -821,6 +909,7 @@ fn main() {
                 ListCommand::Current => cmd_proc_list(),
                 ListCommand::Today => cmd_proc_list_today(),
             },
+            ProcCommand::Show(a) => cmd_proc_show(&a.name, a.duration.as_deref()),
         },
         Command::Rules(args) => match args.subcommand {
             RulesCommand::Show => cmd_rules_show(),

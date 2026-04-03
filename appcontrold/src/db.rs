@@ -19,6 +19,7 @@ pub fn open_db(path: &str) -> Result<Connection> {
              id               INTEGER PRIMARY KEY AUTOINCREMENT,
              boot_id          INTEGER NOT NULL REFERENCES boot_sessions(id),
              pid              INTEGER NOT NULL,
+             uid              INTEGER NOT NULL DEFAULT 0,
              name             TEXT    NOT NULL,
              cmdline          TEXT    NOT NULL,
              start_time       INTEGER NOT NULL,
@@ -28,6 +29,11 @@ pub fn open_db(path: &str) -> Result<Connection> {
          CREATE INDEX IF NOT EXISTS idx_processes_boot_pid
              ON processes(boot_id, pid, start_time);",
     )?;
+    // Migrate existing databases that predate the uid column.
+    let _ = conn.execute(
+        "ALTER TABLE processes ADD COLUMN uid INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     Ok(conn)
 }
 
@@ -49,9 +55,9 @@ pub fn insert_process(
     snap: &ProcSnapshot,
 ) -> Result<i64> {
     conn.execute(
-        "INSERT INTO processes (boot_id, pid, name, cmdline, start_time)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![boot_id, snap.pid, snap.name, snap.cmdline, snap.start_epoch],
+        "INSERT INTO processes (boot_id, pid, uid, name, cmdline, start_time)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![boot_id, snap.pid, snap.uid, snap.name, snap.cmdline, snap.start_epoch],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -110,6 +116,50 @@ pub fn list_processes_active_today(
                 name: row.get(0)?,
                 start_time: row.get(1)?,
                 end_time: row.get(2)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(records)
+}
+
+pub struct EntryRecord {
+    pub id: i64,
+    pub pid: u32,
+    pub uid: u32,
+    pub name: String,
+    pub cmdline: String,
+    pub start_time: i64,
+    pub end_time: Option<i64>,
+    pub duration_seconds: Option<i64>,
+}
+
+/// `since` is an optional Unix timestamp; when set, only entries with
+/// `start_time >= since` are returned.
+pub fn list_entries_by_name(
+    conn: &Connection,
+    name: &str,
+    since: Option<i64>,
+) -> Result<Vec<EntryRecord>> {
+    let cutoff = since.unwrap_or(0);
+    let mut stmt = conn.prepare(
+        "SELECT id, pid, uid, name, cmdline, start_time, end_time, duration_seconds
+         FROM processes
+         WHERE name = ?1
+           AND start_time >= ?2
+         ORDER BY start_time DESC",
+    )?;
+    let records = stmt
+        .query_map(rusqlite::params![name, cutoff], |row| {
+            Ok(EntryRecord {
+                id: row.get(0)?,
+                pid: row.get(1)?,
+                uid: row.get(2)?,
+                name: row.get(3)?,
+                cmdline: row.get(4)?,
+                start_time: row.get(5)?,
+                end_time: row.get(6)?,
+                duration_seconds: row.get(7)?,
             })
         })?
         .filter_map(|r| r.ok())
