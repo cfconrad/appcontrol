@@ -3,7 +3,7 @@ Description=AppControl daemon
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/appcontrold serve --data-dir %S/appcontrold
+ExecStart=/usr/bin/appcontrold --data-dir %S/appcontrold serve
 User=root
 Group=root
 Restart=on-failure

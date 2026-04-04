@@ -27,6 +27,10 @@ enum LogLevel {
 #[derive(Parser)]
 #[command(name = "appmon", about = "Application activity monitor")]
 struct Cli {
+    /// Directory where appmon.db and appmon_config.db are stored.
+    /// Overridden by the DATA_DIR environment variable.
+    #[arg(long, env = "DATA_DIR", default_value = ".")]
+    data_dir: std::path::PathBuf,
     /// Set log level (warn, info, debug)
     #[arg(long, value_enum, default_value = "warn")]
     log_level: LogLevel,
@@ -37,18 +41,10 @@ struct Cli {
     command: Option<Command>,
 }
 
-#[derive(Args)]
-struct ServeArgs {
-    /// Directory where appmon.db and appmon_config.db are stored.
-    /// Overridden by the DATA_DIR environment variable.
-    #[arg(long, env = "DATA_DIR", default_value = ".")]
-    data_dir: std::path::PathBuf,
-}
-
 #[derive(Subcommand)]
 enum Command {
     /// Run the monitoring daemon (default)
-    Serve(ServeArgs),
+    Serve,
     /// Manage monitor configuration
     Config(ConfigArgs),
     /// Inspect tracked processes
@@ -129,14 +125,6 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("system time before epoch")
         .as_secs() as i64
-}
-
-fn get_config_path() -> String {
-    std::env::var("APPMON_CONFIG_DB").unwrap_or_else(|_| "appmon_config.db".to_string())
-}
-
-fn get_data_path() -> String {
-    std::env::var("APPMON_DB").unwrap_or_else(|_| "appmon.db".to_string())
 }
 
 fn window_start_for_reset(now: i64, reset_behavior: &str) -> i64 {
@@ -379,8 +367,8 @@ fn cmd_serve(data_dir: &std::path::Path) {
     eprintln!("appmon: done.");
 }
 
-fn cmd_config_show() {
-    let path = get_config_path();
+fn cmd_config_show(data_dir: &std::path::Path) {
+    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
     let conn = config::open_config_db(&path)
         .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
     let entries = config::list_whitelist_entries(&conn)
@@ -408,8 +396,8 @@ fn cmd_config_show() {
     }
 }
 
-fn cmd_config_edit() {
-    let path = get_config_path();
+fn cmd_config_edit(data_dir: &std::path::Path) {
+    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
     let conn = config::open_config_db(&path)
         .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
 
@@ -518,8 +506,8 @@ fn format_duration(secs: i64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-fn cmd_proc_list_today() {
-    let path = get_data_path();
+fn cmd_proc_list_today(data_dir: &std::path::Path) {
+    let path = data_dir.join("appmon.db").to_string_lossy().into_owned();
     let conn = db::open_db(&path)
         .unwrap_or_else(|e| panic!("cannot open data DB {path:?}: {e}"));
 
@@ -553,7 +541,7 @@ fn cmd_proc_list_today() {
     }
 }
 
-fn cmd_proc_show(name: &str, duration: Option<&str>) {
+fn cmd_proc_show(data_dir: &std::path::Path, name: &str, duration: Option<&str>) {
     use chrono::{DateTime, Utc};
 
     let since: Option<i64> = match duration {
@@ -565,7 +553,7 @@ fn cmd_proc_show(name: &str, duration: Option<&str>) {
         None => None,
     };
 
-    let path = get_data_path();
+    let path = data_dir.join("appmon.db").to_string_lossy().into_owned();
     let conn = db::open_db(&path)
         .unwrap_or_else(|e| panic!("cannot open data DB {path:?}: {e}"));
 
@@ -607,9 +595,9 @@ fn cmd_proc_show(name: &str, duration: Option<&str>) {
     }
 }
 
-fn cmd_proc_list() {
-    let data_path = get_data_path();
-    let config_path = get_config_path();
+fn cmd_proc_list(data_dir: &std::path::Path) {
+    let data_path = data_dir.join("appmon.db").to_string_lossy().into_owned();
+    let config_path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
 
     let data_conn = db::open_db(&data_path)
         .unwrap_or_else(|e| panic!("cannot open data DB {data_path:?}: {e}"));
@@ -759,8 +747,8 @@ fn format_limit(minutes: i64) -> String {
     }
 }
 
-fn cmd_rules_show() {
-    let path = get_config_path();
+fn cmd_rules_show(data_dir: &std::path::Path) {
+    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
     let conn = config::open_config_db(&path)
         .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
     let rules = config::list_rules(&conn)
@@ -784,8 +772,8 @@ fn cmd_rules_show() {
     }
 }
 
-fn cmd_rules_edit() {
-    let path = get_config_path();
+fn cmd_rules_edit(data_dir: &std::path::Path) {
+    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
     let conn = config::open_config_db(&path)
         .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
     let rules = config::list_rules(&conn)
@@ -894,26 +882,23 @@ fn main() {
         }
     };
     env_logger::Builder::new().filter_level(level).init();
-    match cli.command.unwrap_or_else(|| Command::Serve(ServeArgs {
-        data_dir: std::path::PathBuf::from(
-            std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string()),
-        ),
-    })) {
-        Command::Serve(args) => cmd_serve(&args.data_dir),
+    let data_dir = &cli.data_dir;
+    match cli.command.unwrap_or(Command::Serve) {
+        Command::Serve => cmd_serve(data_dir),
         Command::Config(args) => match args.subcommand {
-            ConfigCommand::Show => cmd_config_show(),
-            ConfigCommand::Edit => cmd_config_edit(),
+            ConfigCommand::Show => cmd_config_show(data_dir),
+            ConfigCommand::Edit => cmd_config_edit(data_dir),
         },
         Command::Proc(args) => match args.subcommand {
             ProcCommand::List(list_args) => match list_args.subcommand {
-                ListCommand::Current => cmd_proc_list(),
-                ListCommand::Today => cmd_proc_list_today(),
+                ListCommand::Current => cmd_proc_list(data_dir),
+                ListCommand::Today => cmd_proc_list_today(data_dir),
             },
-            ProcCommand::Show(a) => cmd_proc_show(&a.name, a.duration.as_deref()),
+            ProcCommand::Show(a) => cmd_proc_show(data_dir, &a.name, a.duration.as_deref()),
         },
         Command::Rules(args) => match args.subcommand {
-            RulesCommand::Show => cmd_rules_show(),
-            RulesCommand::Edit => cmd_rules_edit(),
+            RulesCommand::Show => cmd_rules_show(data_dir),
+            RulesCommand::Edit => cmd_rules_edit(data_dir),
         },
     }
 }
