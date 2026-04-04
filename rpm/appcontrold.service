@@ -10,5 +10,9 @@ Restart=on-failure
 StateDirectory=appcontrold
 StateDirectoryMode=0755
 
+# Let systemd manage the config directory
+ConfigurationDirectory=appcontrolld
+ConfigurationDirectoryMode=0755
+
 [Install]
 WantedBy=multi-user.target
