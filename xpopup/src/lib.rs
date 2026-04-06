@@ -1,6 +1,56 @@
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, RichText, Rounding, Stroke, Vec2};
 
+/// Return the X11 window that currently holds input focus, or 0 on error /
+/// if focus is on root/PointerRoot.
+fn x11_focused_window() -> u32 {
+    use x11rb::protocol::xproto::ConnectionExt;
+
+    let (conn, _) = match x11rb::connect(None) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    let cookie = match conn.get_input_focus() {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    match cookie.reply() {
+        Ok(r) if r.focus > 1 => r.focus,
+        _ => 0,
+    }
+}
+
+/// Grab the keyboard via X11 so that WM shortcuts (Alt+Tab, Super, …) are
+/// swallowed by this window and cannot be used to switch away.
+///
+/// Returns the grabbed window ID on success, or 0 if the grab is not yet
+/// possible (e.g. focus not transferred yet) — the caller should retry.
+fn x11_grab_keyboard() -> u32 {
+    use x11rb::protocol::xproto::{ConnectionExt, GrabMode, GrabStatus, Time};
+
+    let focus_window = x11_focused_window();
+    if focus_window == 0 {
+        return 0;
+    }
+
+    let (conn, _) = match x11rb::connect(None) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("xpopup: cannot connect to X11: {e}"); return 0; }
+    };
+
+    let grab_cookie = match conn.grab_keyboard(
+        true, focus_window, Time::CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC,
+    ) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("xpopup: grab_keyboard send error: {e}"); return 0; }
+    };
+    match grab_cookie.reply() {
+        Ok(r) if r.status == GrabStatus::SUCCESS => focus_window,
+        Ok(r) => { eprintln!("xpopup: XGrabKeyboard failed: status={:?}", r.status); 0 }
+        Err(e) => { eprintln!("xpopup: XGrabKeyboard reply error: {e}"); 0 }
+    }
+}
+
 pub struct XPopup {
     message: String,
     background_texture: Option<egui::TextureHandle>,
@@ -10,6 +60,8 @@ pub struct XPopup {
     cached_content_height: f32,
     /// When true, the "Let me finish" button is hidden.
     warn_only: bool,
+    /// X11 window ID that holds the keyboard grab, or 0 if not yet grabbed.
+    grabbed_window: u32,
 }
 
 impl XPopup {
@@ -21,6 +73,7 @@ impl XPopup {
             texture_loaded: false,
             cached_content_height: 200.0,
             warn_only,
+            grabbed_window: 0,
         }
     }
 
@@ -199,6 +252,17 @@ impl eframe::App for XPopup {
 
         // Keep the window always on top and fullscreen
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+
+        // Grab the keyboard once the window is mapped so the WM cannot
+        // intercept Alt+Tab, Super, or other switch shortcuts.
+        // Each frame, verify that focus is still on our grabbed window; re-grab if it moved.
+        if self.grabbed_window != 0 && x11_focused_window() != self.grabbed_window {
+            self.grabbed_window = 0;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        if self.grabbed_window == 0 {
+            self.grabbed_window = x11_grab_keyboard();
+        }
 
         self.load_texture(ctx);
 
