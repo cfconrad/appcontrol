@@ -1,0 +1,18 @@
+[package]
+name = "vocab_trainer"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "vocab_trainer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vocab_trainer"
+path = "src/main.rs"
+
+[dependencies]
+eframe  = "0.29"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rand    = "0.8"
+clap    = { version = "4", features = ["derive"] }
