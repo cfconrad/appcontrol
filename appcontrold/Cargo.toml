@@ -12,4 +12,5 @@ clap     = { version = "4", features = ["derive", "env"] }
 chrono   = "0.4"
 log = "0.4.29"
 env_logger = "0.11.9"
-xpopup = { path = "../xpopup" }
+xpopup        = { path = "../xpopup" }
+vocab_trainer = { path = "../vocab_trainer" }

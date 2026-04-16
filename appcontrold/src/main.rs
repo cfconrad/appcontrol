@@ -3,6 +3,8 @@ mod db;
 mod notify;
 mod proc;
 
+extern crate vocab_trainer;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -51,6 +53,8 @@ enum Command {
     Proc(ProcArgs),
     /// Manage usage rules
     Rules(RulesArgs),
+    /// Manage vocabulary quiz progress
+    Vocab(VocabArgs),
 }
 
 #[derive(Args)]
@@ -118,6 +122,53 @@ enum RulesCommand {
     Show,
     /// Edit rules in $EDITOR
     Edit,
+    /// Manage vocabulary quiz rules
+    Vocab(VocabRulesArgs),
+}
+
+#[derive(Args)]
+struct VocabRulesArgs {
+    #[command(subcommand)]
+    subcommand: VocabRulesCommand,
+}
+
+#[derive(Subcommand)]
+enum VocabRulesCommand {
+    /// Show all vocabulary quiz rules
+    Show,
+    /// Edit vocabulary quiz rules in $EDITOR
+    Edit,
+}
+
+// ── appmon vocab <subcommand> ────────────────────────────────────────────────
+
+#[derive(Args)]
+struct VocabArgs {
+    #[command(subcommand)]
+    subcommand: VocabCommand,
+}
+
+#[derive(Subcommand)]
+enum VocabCommand {
+    /// Show correct-answer counts for a user
+    List(VocabUserArg),
+    /// Edit correct-answer counts for a user in $EDITOR
+    Edit(VocabEditCmdArgs),
+}
+
+#[derive(Args)]
+struct VocabUserArg {
+    /// Username to display or edit progress for
+    user: String,
+}
+
+#[derive(Args)]
+struct VocabEditCmdArgs {
+    /// Username whose progress to edit
+    user: String,
+    /// Vocabulary file — pre-populates words with zero count so they appear in the editor
+    #[arg(long)]
+    words_file: Option<String>,
 }
 
 fn now_secs() -> i64 {
@@ -153,10 +204,13 @@ struct ExceededGroup {
 }
 
 /// Returns one entry per rule group that is currently exceeded.
+/// Time credits earned via the vocabulary quiz are subtracted from usage.
 fn check_limit_rules(
     data_conn: &Connection,
+    config_conn: &Connection,
     rules: &[config::Rule],
     whitelist_entries: &[config::WhitelistEntry],
+    vocab_rules: &[config::VocabRule],
     now: i64,
 ) -> Vec<ExceededGroup> {
     let mut exceeded: Vec<ExceededGroup> = Vec::new();
@@ -191,7 +245,19 @@ fn check_limit_rules(
             }
         }
 
-        let total_secs: i64 = per_app.values().sum();
+        let raw_secs: i64 = per_app.values().sum();
+
+        // Subtract credits earned across all vocab rules for this group.
+        let credits: i64 = vocab_rules
+            .iter()
+            .filter(|vr| vr.group_name == rule.group_name)
+            .map(|vr| {
+                let since = config::period_start(now, &vr.reset_time);
+                config::sum_credits_since(config_conn, vr.id, since).unwrap_or(0)
+            })
+            .sum();
+        let total_secs = (raw_secs - credits).max(0);
+
         if total_secs > rule.limit * 60 {
             let mut app_usage: Vec<(String, i64)> = per_app.into_iter().collect();
             app_usage.sort_by(|a, b| b.1.cmp(&a.1));
@@ -270,15 +336,17 @@ fn cmd_serve(data_dir: &std::path::Path) {
         next = now + 15;
         debug!("Looop {} > {}", now, next);
 
-        // Reload whitelist, entries, and rules every 30 seconds
+        // Reload whitelist, entries, rules, and vocab rules every 30 seconds.
         whitelist = config::load_whitelist(&config_conn);
         let whitelist_entries = config::list_whitelist_entries(&config_conn)
             .unwrap_or_else(|e| { eprintln!("appmon: cannot reload whitelist entries: {e}"); vec![] });
         let rules = config::list_rules(&config_conn)
             .unwrap_or_else(|e| { eprintln!("appmon: cannot reload rules: {e}"); vec![] });
+        let vocab_rules = config::list_vocab_rules(&config_conn)
+            .unwrap_or_else(|e| { eprintln!("appmon: cannot reload vocab rules: {e}"); vec![] });
 
-        // Check limit rules every 60 seconds
-        let exceeded = check_limit_rules(&data_conn, &rules, &whitelist_entries, now);
+        // Check limit rules every cycle (credits already subtracted inside).
+        let exceeded = check_limit_rules(&data_conn, &config_conn, &rules, &whitelist_entries, &vocab_rules, now);
 
         // Build current set
         let snapshots = proc::enumerate_processes(boot_time, clk_tck);
@@ -297,6 +365,17 @@ fn cmd_serve(data_dir: &std::path::Path) {
                 .filter_map(|e| regex::Regex::new(&e.pattern).ok())
                 .collect();
 
+            // Pick the first vocab rule for this group that hasn't been used in its
+            // current reset period.  Falls back to None (→ regular notify) only when
+            // every rule has already been completed this period.
+            let vocab_rule = vocab_rules
+                .iter()
+                .filter(|vr| vr.group_name == eg.group_name)
+                .find(|vr| {
+                    !config::has_credit_in_period(&config_conn, vr.id, &vr.reset_time, now)
+                        .unwrap_or(false)
+                });
+
             let mut notified_uids = std::collections::HashSet::new();
             for ((pid, _), snap) in &current {
                 if patterns.iter().any(|re| re.is_match(&snap.name))
@@ -308,15 +387,27 @@ fn cmd_serve(data_dir: &std::path::Path) {
                         .map(|(_, secs)| *secs)
                         .unwrap_or(0);
 
-                    let msg = format!(
-                        "# Usage limit reached\n\n\n\
-                         **{}** has used {} of its {} {} allowance.",
-                        snap.name,
-                        format_duration(app_used),
-                        format_limit(eg.limit_mins),
-                        eg.reset_behavior,
-                    );
-                    notify(snap.uid, *pid, &msg);
+                    if let Some(vr) = vocab_rule {
+                        // Offer the vocabulary quiz to earn extra time.
+                        notify::vocab_quiz(
+                            snap.uid,
+                            *pid,
+                            eg.group_name.clone(),
+                            vr.clone(),
+                            config_path.clone(),
+                            data_dir.to_string_lossy().into_owned(),
+                        );
+                    } else {
+                        let msg = format!(
+                            "# Usage limit reached\n\n\n\
+                             **{}** has used {} of its {} {} allowance.",
+                            snap.name,
+                            format_duration(app_used),
+                            format_limit(eg.limit_mins),
+                            eg.reset_behavior,
+                        );
+                        notify(snap.uid, *pid, &msg);
+                    }
                 }
             }
         }
@@ -618,10 +709,12 @@ fn cmd_proc_list(data_dir: &std::path::Path) {
         .unwrap_or_else(|e| { eprintln!("appmon: cannot load whitelist entries: {e}"); vec![] });
     let rules = config::list_rules(&config_conn)
         .unwrap_or_else(|e| { eprintln!("appmon: cannot load rules: {e}"); vec![] });
+    let vocab_rules = config::list_vocab_rules(&config_conn)
+        .unwrap_or_else(|e| { eprintln!("appmon: cannot load vocab rules: {e}"); vec![] });
 
-    // Compute used seconds per rule group within its reset window.
-    // group_name -> (used_secs, limit_mins)
-    let mut group_usage: HashMap<String, (i64, i64)> = HashMap::new();
+    // Compute used seconds and vocab credits per rule group within its reset window.
+    // group_name -> (raw_used_secs, limit_mins, extra_secs)
+    let mut group_usage: HashMap<String, (i64, i64, i64)> = HashMap::new();
     for rule in &rules {
         let window_start = window_start_for_reset(now, &rule.reset_behavior);
         let patterns: Vec<regex::Regex> = whitelist_entries
@@ -642,7 +735,15 @@ fn cmd_proc_list(data_dir: &std::path::Path) {
                 total_secs += (effective_end - effective_start).max(0);
             }
         }
-        group_usage.insert(rule.group_name.clone(), (total_secs, rule.limit));
+        let extra_secs: i64 = vocab_rules
+            .iter()
+            .filter(|vr| vr.group_name == rule.group_name)
+            .map(|vr| {
+                let since = config::period_start(now, &vr.reset_time);
+                config::sum_credits_since(&config_conn, vr.id, since).unwrap_or(0)
+            })
+            .sum();
+        group_usage.insert(rule.group_name.clone(), (total_secs, rule.limit, extra_secs));
     }
 
     // Compiled patterns for matching a process name to its group.
@@ -653,10 +754,10 @@ fn cmd_proc_list(data_dir: &std::path::Path) {
         .collect();
 
     println!(
-        "{:<6}  {:<6}  {:<12}  {:<9}  {:<14}  {:<9}  {:<9}  cmdline",
-        "db_id", "pid", "name", "running", "group", "used", "left",
+        "{:<6}  {:<6}  {:<12}  {:<9}  {:<14}  {:<9}  {:<9}  {:<9}  cmdline",
+        "db_id", "pid", "name", "running", "group", "used", "extra", "left",
     );
-    println!("{}", "-".repeat(96));
+    println!("{}", "-".repeat(108));
     for r in &records {
         let running = format_duration(now - r.start_time);
 
@@ -666,18 +767,24 @@ fn cmd_proc_list(data_dir: &std::path::Path) {
             .map(|(_, g)| g.as_str())
             .unwrap_or("-");
 
-        let (used_str, left_str) = match group_usage.get(group) {
-            Some((used_secs, limit_mins)) => {
+        let (used_str, extra_str, left_str) = match group_usage.get(group) {
+            Some((raw_secs, limit_mins, extra_secs)) => {
                 let limit_secs = limit_mins * 60;
-                let left_secs = limit_secs - used_secs;
+                let effective_used = (raw_secs - extra_secs).max(0);
+                let left_secs = limit_secs - effective_used;
                 let left = if left_secs <= 0 {
                     "OVER".to_string()
                 } else {
                     format_duration(left_secs)
                 };
-                (format_duration(*used_secs), left)
+                let extra = if *extra_secs > 0 {
+                    format!("+{}", format_duration(*extra_secs))
+                } else {
+                    "-".to_string()
+                };
+                (format_duration(effective_used), extra, left)
             }
-            None => ("-".to_string(), "-".to_string()),
+            None => ("-".to_string(), "-".to_string(), "-".to_string()),
         };
 
         let cmdline = if r.cmdline.len() > 30 {
@@ -686,8 +793,8 @@ fn cmd_proc_list(data_dir: &std::path::Path) {
             r.cmdline.clone()
         };
         println!(
-            "{:<6}  {:<6}  {:<12}  {:<9}  {:<14}  {:<9}  {:<9}  {}",
-            r.id, r.pid, r.name, running, group, used_str, left_str, cmdline,
+            "{:<6}  {:<6}  {:<12}  {:<9}  {:<14}  {:<9}  {:<9}  {:<9}  {}",
+            r.id, r.pid, r.name, running, group, used_str, extra_str, left_str, cmdline,
         );
     }
 }
@@ -870,6 +977,214 @@ fn cmd_rules_edit(data_dir: &std::path::Path) {
     let _ = std::fs::remove_file(tmp_path);
 }
 
+// ---------------------------------------------------------------------------
+// rules vocab show / edit
+// ---------------------------------------------------------------------------
+
+fn cmd_vocab_rules_show(data_dir: &std::path::Path) {
+    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+    let conn = config::open_config_db(&path)
+        .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
+    let rules = config::list_vocab_rules(&conn)
+        .unwrap_or_else(|e| panic!("cannot read vocab rules: {e}"));
+
+    if rules.is_empty() {
+        println!("no vocab rules defined");
+        return;
+    }
+
+    println!(
+        "{:<4}  {:<20}  {:<8}  {:<14}  {:<10}  words-file",
+        "id", "group", "correct", "extra-minutes", "reset-time"
+    );
+    println!("{}", "-".repeat(84));
+    for r in &rules {
+        println!(
+            "{:<4}  {:<20}  {:<8}  {:<14}  {:<10}  {}",
+            r.id, r.group_name, r.correct_needed, r.extra_minutes, r.reset_time, r.words_file
+        );
+    }
+}
+
+fn cmd_vocab_rules_edit(data_dir: &std::path::Path) {
+    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+    let conn = config::open_config_db(&path)
+        .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
+    let rules = config::list_vocab_rules(&conn)
+        .unwrap_or_else(|e| panic!("cannot read vocab rules: {e}"));
+
+    let tmp_path = "/tmp/appmon_vocab_rules_edit.txt";
+
+    let mut content = String::from(
+        "# appmon vocab rules — one entry per line: group correct extra-minutes reset-time words-file\n\
+         # group         : application group name (matches whitelist group column)\n\
+         # correct       : correct answers needed to earn extra time\n\
+         # extra-minutes : minutes of extra time awarded\n\
+         # reset-time    : how often the rule resets: daily, weekly, monthly\n\
+         # words-file    : path to the vocabulary text file\n\
+         # Lines starting with '#' are ignored\n\n",
+    );
+    for r in &rules {
+        content.push_str(&format!(
+            "{} {} {} {} {}\n",
+            r.group_name, r.correct_needed, r.extra_minutes, r.reset_time, r.words_file
+        ));
+    }
+
+    std::fs::write(tmp_path, &content)
+        .unwrap_or_else(|e| panic!("cannot write temp file: {e}"));
+
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let status = std::process::Command::new(&editor)
+        .arg(tmp_path)
+        .status()
+        .unwrap_or_else(|e| panic!("cannot launch editor '{editor}': {e}"));
+
+    if !status.success() {
+        eprintln!("appmon: editor exited with non-zero status, aborting");
+        std::process::exit(1);
+    }
+
+    let edited = std::fs::read_to_string(tmp_path)
+        .unwrap_or_else(|e| panic!("cannot read temp file: {e}"));
+
+    let mut valid_rules: Vec<config::VocabRule> = Vec::new();
+    for line in edited.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Format: group correct extra-minutes reset-time words-file (words-file may contain spaces)
+        let mut fields = line.splitn(5, char::is_whitespace);
+        let group = match fields.next().map(str::trim) {
+            Some(f) if !f.is_empty() => f,
+            _ => continue,
+        };
+        let correct_str = match fields.next().map(str::trim) {
+            Some(f) if !f.is_empty() => f,
+            _ => {
+                eprintln!("appmon: skipping malformed vocab rule (expected: group correct extra-minutes reset-time words-file): {line:?}");
+                continue;
+            }
+        };
+        let extra_str = match fields.next().map(str::trim) {
+            Some(f) if !f.is_empty() => f,
+            _ => {
+                eprintln!("appmon: skipping malformed vocab rule: {line:?}");
+                continue;
+            }
+        };
+        let reset_time = match fields.next().map(str::trim) {
+            Some(f) if matches!(f, "daily" | "weekly" | "monthly") => f,
+            Some(other) => {
+                eprintln!("appmon: skipping vocab rule with invalid reset-time {other:?} (expected daily, weekly, or monthly): {line:?}");
+                continue;
+            }
+            _ => {
+                eprintln!("appmon: skipping vocab rule with missing reset-time: {line:?}");
+                continue;
+            }
+        };
+        let words_file = match fields.next().map(str::trim) {
+            Some(f) if !f.is_empty() => f,
+            _ => {
+                eprintln!("appmon: skipping vocab rule with missing words-file: {line:?}");
+                continue;
+            }
+        };
+        let correct_needed: i64 = match correct_str.parse() {
+            Ok(v) if v > 0 => v,
+            _ => {
+                eprintln!("appmon: skipping vocab rule with invalid correct value {correct_str:?}");
+                continue;
+            }
+        };
+        let extra_minutes: i64 = match extra_str.parse() {
+            Ok(v) if v > 0 => v,
+            _ => {
+                eprintln!("appmon: skipping vocab rule with invalid extra-minutes value {extra_str:?}");
+                continue;
+            }
+        };
+        valid_rules.push(config::VocabRule {
+            id: 0,
+            group_name: group.to_string(),
+            correct_needed,
+            extra_minutes,
+            reset_time: reset_time.to_string(),
+            words_file: words_file.to_string(),
+        });
+    }
+
+    config::set_vocab_rules(&conn, &valid_rules)
+        .unwrap_or_else(|e| panic!("cannot update vocab rules: {e}"));
+
+    println!("appmon: vocab rules updated ({} rule(s))", valid_rules.len());
+
+    let _ = std::fs::remove_file(tmp_path);
+}
+
+// ---------------------------------------------------------------------------
+// vocab list / edit (progress per user)
+// ---------------------------------------------------------------------------
+
+fn progress_db_path(data_dir: &std::path::Path, uid: u32) -> String {
+    format!("/tmp/vocab_progress_{uid}.db")
+}
+
+fn cmd_vocab_list(data_dir: &std::path::Path, username: &str) {
+    let uid = match proc::username_to_uid(username) {
+        Some(u) => u,
+        None => {
+            eprintln!("appmon: unknown user {username:?}");
+            std::process::exit(1);
+        }
+    };
+    let db_path = progress_db_path(data_dir, uid);
+    vocab_trainer::print_progress(&db_path, username);
+}
+
+fn cmd_vocab_edit(data_dir: &std::path::Path, username: &str, words_file: Option<&str>) {
+    let uid = match proc::username_to_uid(username) {
+        Some(u) => u,
+        None => {
+            // Fall back to looking for words-file from vocab_rules.
+            eprintln!("appmon: unknown user {username:?}");
+            std::process::exit(1);
+        }
+    };
+    let db_path = progress_db_path(data_dir, uid);
+
+    // If no words-file given, try to find one from vocab_rules.
+    let derived_words_file: Option<String>;
+    let effective_words_file = if words_file.is_some() {
+        words_file
+    } else {
+        let config_path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+        if let Ok(conn) = config::open_config_db(&config_path) {
+            if let Ok(rules) = config::list_vocab_rules(&conn) {
+                derived_words_file = rules.into_iter().next().map(|r| r.words_file);
+                derived_words_file.as_deref()
+            } else {
+                derived_words_file = None;
+                None
+            }
+        } else {
+            derived_words_file = None;
+            None
+        }
+    };
+
+    vocab_trainer::edit_progress(&db_path, effective_words_file, username);
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
 fn main() {
     let cli = Cli::parse();
     let level = if cli.debug {
@@ -899,6 +1214,16 @@ fn main() {
         Command::Rules(args) => match args.subcommand {
             RulesCommand::Show => cmd_rules_show(data_dir),
             RulesCommand::Edit => cmd_rules_edit(data_dir),
+            RulesCommand::Vocab(vargs) => match vargs.subcommand {
+                VocabRulesCommand::Show => cmd_vocab_rules_show(data_dir),
+                VocabRulesCommand::Edit => cmd_vocab_rules_edit(data_dir),
+            },
+        },
+        Command::Vocab(args) => match args.subcommand {
+            VocabCommand::List(a) => cmd_vocab_list(data_dir, &a.user),
+            VocabCommand::Edit(a) => {
+                cmd_vocab_edit(data_dir, &a.user, a.words_file.as_deref())
+            }
         },
     }
 }

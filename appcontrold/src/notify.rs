@@ -2,11 +2,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 use log;
 
+use crate::config::VocabRule;
+use crate::proc::uid_to_username;
+
 /// Number of times a uid can click "Ok" before only "Close Application" remains.
 const WARN_LIMIT: u32 = 3;
 
 /// Seconds to wait before re-showing the popup after "Ok" is clicked.
 const REPEAT_SECS: u64 = 30;
+
+/// Seconds the dialog may stay open before the application is force-killed.
+const DIALOG_TIMEOUT_SECS: u64 = 15;
 
 /// Per-uid notification counts (how many times the popup has been shown).
 static COUNTS: LazyLock<Mutex<HashMap<u32, u32>>> =
@@ -71,7 +77,7 @@ fn run_notify_loop(uid: u32, pid: u32, message: String) {
 
         let warn_only = count >= WARN_LIMIT;
 
-        match show_dialog(uid, &message, warn_only) {
+        match show_dialog(uid, pid, &message, warn_only) {
             DialogResult::CloseApplication => {
                 kill_processe(pid);
                 COUNTS.lock().unwrap().remove(&uid);
@@ -92,7 +98,11 @@ fn run_notify_loop(uid: u32, pid: u32, message: String) {
 }
 
 /// Spawn a popup dialog as the target user on their display using the xpopup library.
-fn show_dialog(uid: u32, message: &str, warn_only: bool) -> DialogResult {
+///
+/// If the dialog stays open longer than [`DIALOG_TIMEOUT_SECS`] without the
+/// user clicking a button, the monitored application (`app_pid`) is killed
+/// immediately via SIGTERM.
+fn show_dialog(uid: u32, app_pid: u32, message: &str, warn_only: bool) -> DialogResult {
     let env = match find_user_display_env(uid) {
         Some(e) => e,
         None => {
@@ -133,28 +143,45 @@ fn show_dialog(uid: u32, message: &str, warn_only: bool) -> DialogResult {
             }
 
             // Call the xpopup library function
-            xpopup::run_popup(message.to_string(), None, warn_only);
+            xpopup::run_popup(message.to_string(), None, warn_only, Some(DIALOG_TIMEOUT_SECS));
 
             // Should not be reached as run_popup calls process::exit
             libc::_exit(0);
         } else {
-            // Parent process: wait for the child
-            let mut status = 0;
-            libc::waitpid(pid, &mut status, 0);
+            // Parent process: poll for child exit, enforcing a dialog timeout.
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(DIALOG_TIMEOUT_SECS);
 
-            if libc::WIFEXITED(status) {
-                let exit_code = libc::WEXITSTATUS(status);
-                match exit_code {
-                    0 => DialogResult::Ok,
-                    2 => DialogResult::CloseApplication,
-                    _ => {
-                        eprintln!("appmon notify: xpopup exited with code {exit_code}");
+            loop {
+                let mut status = 0;
+                let ret = libc::waitpid(pid, &mut status, libc::WNOHANG);
+
+                if ret > 0 {
+                    return if libc::WIFEXITED(status) {
+                        let exit_code = libc::WEXITSTATUS(status);
+                        match exit_code {
+                            0 => DialogResult::Ok,
+                            2 => DialogResult::CloseApplication,
+                            _ => {
+                                eprintln!("appmon notify: xpopup exited with code {exit_code}");
+                                DialogResult::Failed
+                            }
+                        }
+                    } else {
+                        eprintln!("appmon notify: xpopup terminated abnormally");
                         DialogResult::Failed
-                    }
+                    };
                 }
-            } else {
-                eprintln!("appmon notify: xpopup terminated abnormally");
-                DialogResult::Failed
+
+                if std::time::Instant::now() >= deadline {
+                    // Dialog timed out — kill the xpopup child and the app.
+                    libc::kill(pid, libc::SIGTERM);
+                    libc::waitpid(pid, &mut status, 0);
+                    kill_processe(app_pid);
+                    return DialogResult::CloseApplication;
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(250));
             }
         }
     }
@@ -240,11 +267,188 @@ fn get_user_gid(uid: u32) -> Option<u32> {
 }
 
 fn kill_processe(pid: u32) {
-
     if !is_process_running(pid) {
         return;
     }
     unsafe {
-        libc::kill(pid.try_into().unwrap() , libc::SIGTERM);
+        libc::kill(pid.try_into().unwrap(), libc::SIGTERM);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vocabulary quiz notification
+// ---------------------------------------------------------------------------
+
+/// Group names that currently have a quiz loop running (prevents duplicate loops).
+static ACTIVE_QUIZ_GROUPS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Offer a vocabulary quiz to the user before showing the usual "limit reached" popup.
+///
+/// If the user completes the quiz (exits 0), extra time is recorded in the config DB.
+/// If the user quits the quiz (exits 1), the regular `notify()` popup is shown instead.
+///
+/// Returns immediately; the quiz loop runs in a background thread.
+pub fn vocab_quiz(
+    uid: u32,
+    pid: u32,
+    group_name: String,
+    rule: VocabRule,
+    config_db_path: String,
+    data_dir: String,
+) {
+    std::thread::spawn(move || {
+        run_quiz_loop(uid, pid, group_name, rule, config_db_path, data_dir)
+    });
+}
+
+fn run_quiz_loop(
+    uid: u32,
+    pid: u32,
+    group_name: String,
+    rule: VocabRule,
+    config_db_path: String,
+    data_dir: String,
+) {
+    // Only one quiz loop per group at a time.
+    if !ACTIVE_QUIZ_GROUPS.lock().unwrap().insert(group_name.clone()) {
+        log::debug!("vocab_quiz: loop already active for group {group_name:?}, skipping");
+        return;
+    }
+
+    if !is_process_running(pid) {
+        ACTIVE_QUIZ_GROUPS.lock().unwrap().remove(&group_name);
+        return;
+    }
+
+    // Skip the quiz if it was already completed in the current reset period.
+    let already_used = match crate::config::open_config_db(&config_db_path) {
+        Ok(conn) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            crate::config::has_credit_in_period(&conn, rule.id, &rule.reset_time, now)
+                .unwrap_or(false)
+        }
+        Err(e) => {
+            eprintln!("appmon vocab_quiz: cannot open config DB to check period: {e}");
+            false
+        }
+    };
+    if already_used {
+        notify(uid, pid, "# Usage limit reached\n\nYou have reached your usage limit.\nThe vocabulary quiz has already been completed for this period.");
+        ACTIVE_QUIZ_GROUPS.lock().unwrap().remove(&group_name);
+        return;
+    }
+
+    let result = show_quiz(uid, &rule, &data_dir);
+
+    match result {
+        QuizOutcome::Earned(earned_secs) => {
+            // Record the credit in the config DB.
+            match crate::config::open_config_db(&config_db_path) {
+                Ok(conn) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    if let Err(e) = crate::config::insert_time_credit(
+                        &conn,
+                        rule.id,
+                        earned_secs,
+                        now,
+                    ) {
+                        eprintln!("appmon vocab_quiz: failed to record credit: {e}");
+                    }
+                }
+                Err(e) => eprintln!("appmon vocab_quiz: cannot open config DB: {e}"),
+            }
+        }
+        QuizOutcome::Quit => {
+            // Fall back to the regular notification popup.
+            notify(uid, pid, "# Usage limit reached\n\nYou have reached your usage limit.\nClose the application or earn more time with the vocabulary quiz.");
+        }
+        QuizOutcome::Failed => {
+            eprintln!("appmon vocab_quiz: quiz process failed for uid {uid}");
+        }
+    }
+
+    ACTIVE_QUIZ_GROUPS.lock().unwrap().remove(&group_name);
+}
+
+#[derive(Debug)]
+enum QuizOutcome {
+    Earned(i64), // seconds earned
+    Quit,
+    Failed,
+}
+
+/// Fork a child process, drop privileges, and run the vocabulary quiz.
+fn show_quiz(uid: u32, rule: &VocabRule, data_dir: &str) -> QuizOutcome {
+    let env = match find_user_display_env(uid) {
+        Some(e) => e,
+        None => {
+            eprintln!("appmon vocab_quiz: cannot find display session for uid {uid}");
+            return QuizOutcome::Failed;
+        }
+    };
+
+    let gid = get_user_gid(uid).unwrap_or(uid);
+    let username = uid_to_username(uid).unwrap_or_else(|| uid.to_string());
+    let progress_db = format!("/tmp/vocab_progress_{uid}.db");
+
+    let config = vocab_trainer::QuizConfig {
+        correct_needed: rule.correct_needed as u32,
+        extra_minutes: rule.extra_minutes as u32,
+        words_file: rule.words_file.clone(),
+        progress_db,
+        username,
+    };
+
+    unsafe {
+        let pid_child = libc::fork();
+        if pid_child < 0 {
+            eprintln!("appmon vocab_quiz: fork failed");
+            return QuizOutcome::Failed;
+        }
+
+        if pid_child == 0 {
+            // Child: set up display env, drop privileges, run quiz.
+            let keys: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            for (key, val) in &env {
+                std::env::set_var(key, val);
+            }
+            if libc::setresgid(gid, gid, gid) != 0 {
+                libc::_exit(2);
+            }
+            if libc::setresuid(uid, uid, uid) != 0 {
+                libc::_exit(2);
+            }
+            vocab_trainer::run_quiz(config);
+            // run_quiz exits the process; this line is unreachable.
+            libc::_exit(2);
+        }
+
+        // Parent: wait for child.
+        let mut status = 0;
+        libc::waitpid(pid_child, &mut status, 0);
+
+        if libc::WIFEXITED(status) {
+            match libc::WEXITSTATUS(status) {
+                0 => QuizOutcome::Earned(rule.extra_minutes * 60),
+                1 => QuizOutcome::Quit,
+                code => {
+                    eprintln!("appmon vocab_quiz: quiz exited with code {code}");
+                    QuizOutcome::Failed
+                }
+            }
+        } else {
+            eprintln!("appmon vocab_quiz: quiz terminated abnormally");
+            QuizOutcome::Failed
+        }
     }
 }
