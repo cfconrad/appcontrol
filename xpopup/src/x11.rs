@@ -66,9 +66,10 @@ impl XPopup {
         message: String,
         bg_image_path: Option<String>,
         warn_only: bool,
+        timeout_secs: Option<u64>,
     ) -> Self {
         Self {
-            state: PopupState::new(message, bg_image_path, warn_only),
+            state: PopupState::new(message, bg_image_path, warn_only, timeout_secs),
             grabbed_window: 0,
         }
     }
@@ -86,10 +87,20 @@ impl eframe::App for XPopup {
         if let Some(code) = popup_ui(ctx, &mut self.state) {
             std::process::exit(code);
         }
+
+        // Re-render regularly so the countdown label ticks down.
+        if self.state.deadline.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
     }
 }
 
-pub(crate) fn run_x11(message: String, bg_image_path: Option<String>, warn_only: bool) {
+pub(crate) fn run_x11(
+    message: String,
+    bg_image_path: Option<String>,
+    warn_only: bool,
+    timeout_secs: Option<u64>,
+) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_fullscreen(true)
@@ -101,7 +112,7 @@ pub(crate) fn run_x11(message: String, bg_image_path: Option<String>, warn_only:
     eframe::run_native(
         "xpopup",
         options,
-        Box::new(|cc| Ok(Box::new(XPopup::new(cc, message, bg_image_path, warn_only)))),
+        Box::new(|cc| Ok(Box::new(XPopup::new(cc, message, bg_image_path, warn_only, timeout_secs)))),
     )
     .unwrap();
 }

@@ -114,16 +114,24 @@ pub(crate) struct PopupState {
     pub bg_image_path: Option<String>,
     pub background_texture: Option<egui::TextureHandle>,
     pub cached_content_height: f32,
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl PopupState {
-    pub fn new(message: String, bg_image_path: Option<String>, warn_only: bool) -> Self {
+    pub fn new(
+        message: String,
+        bg_image_path: Option<String>,
+        warn_only: bool,
+        timeout_secs: Option<u64>,
+    ) -> Self {
         Self {
             message,
             warn_only,
             bg_image_path,
             background_texture: None,
             cached_content_height: 200.0,
+            deadline: timeout_secs
+                .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s)),
         }
     }
 
@@ -176,6 +184,13 @@ pub(crate) fn popup_ui(ctx: &egui::Context, state: &mut PopupState) -> Option<i3
         bg_painter.rect_filled(screen_rect, 0.0, Color32::from_rgb(50, 50, 50));
     }
 
+    // Auto-close when the deadline has passed.
+    if let Some(dl) = state.deadline {
+        if std::time::Instant::now() >= dl {
+            return Some(2);
+        }
+    }
+
     let mut exit_code: Option<i32> = None;
 
     egui::CentralPanel::default()
@@ -204,6 +219,22 @@ pub(crate) fn popup_ui(ctx: &egui::Context, state: &mut PopupState) -> Option<i3
                     state.cached_content_height = content.response.rect.height();
 
                     ui.add_space(PAD_MID);
+
+                    // Countdown label
+                    if let Some(dl) = state.deadline {
+                        let secs_left = dl
+                            .saturating_duration_since(std::time::Instant::now())
+                            .as_secs();
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!("Closing in {secs_left}s"))
+                                    .size(BASE_SIZE)
+                                    .color(Color32::from_rgb(230, 140, 30)),
+                            );
+                            ui.add_space(8.0);
+                        });
+                    }
 
                     ui.horizontal(|ui| {
                         let button_width = 120.0;

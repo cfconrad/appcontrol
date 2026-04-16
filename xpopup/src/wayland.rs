@@ -273,7 +273,12 @@ impl Dispatch<ExtSessionLockSurfaceV1, usize> for LockState {
     }
 }
 
-pub(crate) fn run_wayland_locked(message: String, bg_image_path: Option<String>, warn_only: bool) {
+pub(crate) fn run_wayland_locked(
+    message: String,
+    bg_image_path: Option<String>,
+    warn_only: bool,
+    timeout_secs: Option<u64>,
+) {
     // --- Connect and scan globals ---
     let conn = Connection::connect_to_env().expect("xpopup: cannot connect to Wayland");
     let mut queue = conn.new_event_queue::<LockState>();
@@ -440,7 +445,7 @@ pub(crate) fn run_wayland_locked(message: String, bg_image_path: Option<String>,
     let egui_ctx = egui::Context::default();
     egui_ctx.set_visuals(egui::Visuals::dark());
 
-    let mut popup_state = PopupState::new(message, bg_image_path, warn_only);
+    let mut popup_state = PopupState::new(message, bg_image_path, warn_only, timeout_secs);
 
     // Load background texture into the egui context.
     popup_state.load_texture(&egui_ctx);
@@ -545,8 +550,10 @@ pub(crate) fn run_wayland_locked(message: String, bg_image_path: Option<String>,
             std::process::exit(code);
         }
 
-        // Block until the next Wayland event arrives, then re-render.
-        queue.blocking_dispatch(&mut state).expect("xpopup: Wayland dispatch failed");
+        // Poll for pending events without blocking so the countdown stays live.
+        queue.dispatch_pending(&mut state).expect("xpopup: Wayland dispatch failed");
+        conn.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(250));
         state.needs_render = true;
     }
 }

@@ -2,10 +2,15 @@ mod ui;
 mod wayland;
 mod x11;
 
-pub fn run_popup(message: String, bg_image_path: Option<String>, warn_only: bool) {
+pub fn run_popup(
+    message: String,
+    bg_image_path: Option<String>,
+    warn_only: bool,
+    timeout_secs: Option<u64>,
+) {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        wayland::run_wayland_locked(message, bg_image_path, warn_only);
+        wayland::run_wayland_locked(message, bg_image_path, warn_only, timeout_secs);
     } else {
-        x11::run_x11(message, bg_image_path, warn_only);
+        x11::run_x11(message, bg_image_path, warn_only, timeout_secs);
     }
 }
