@@ -7,3 +7,10 @@ edition = "2024"
 eframe = "0.29"
 image = { version = "0.25", features = ["png", "jpeg", "bmp"] }
 x11rb = "0.13"
+raw-window-handle = "0.6"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["staging", "client"] }
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wgpu = "22"
+egui-wgpu = "0.29"
+pollster = "0.3"
