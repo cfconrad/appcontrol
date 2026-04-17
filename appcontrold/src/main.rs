@@ -27,7 +27,7 @@ enum LogLevel {
 }
 
 #[derive(Parser)]
-#[command(name = "appmon", about = "Application activity monitor")]
+#[command(name = "appcontrol", about = "Application activity monitor")]
 struct Cli {
     /// Directory where appmon.db and appmon_config.db are stored.
     /// Overridden by the DATA_DIR environment variable.
@@ -60,7 +60,7 @@ enum Command {
 #[derive(Args)]
 struct AppMappingArgs {
     #[command(subcommand)]
-    subcommand: ConfigCommand,
+    subcommand: Option<ConfigCommand>,
 }
 
 #[derive(Subcommand)]
@@ -74,19 +74,19 @@ enum ConfigCommand {
 #[derive(Args)]
 struct PsArgs {
     #[command(subcommand)]
-    subcommand: ProcCommand,
+    subcommand: Option<PsCommand>,
 }
 
 #[derive(Subcommand)]
-enum ProcCommand {
+enum PsCommand {
     /// List processes
-    List(ListArgs),
+    Show(ShowArgs),
     /// Show all database entries for a named application
-    Show(ProcShowArgs),
+    Db(PsDbArgs),
 }
 
 #[derive(Args)]
-struct ProcShowArgs {
+struct PsDbArgs {
     /// Application name to look up
     name: String,
     /// Only show entries started within this duration ago.
@@ -97,9 +97,9 @@ struct ProcShowArgs {
 }
 
 #[derive(Args)]
-struct ListArgs {
+struct ShowArgs {
     #[command(subcommand)]
-    subcommand: ListCommand,
+    subcommand: Option<ListCommand>,
 }
 
 #[derive(Subcommand)]
@@ -113,7 +113,7 @@ enum ListCommand {
 #[derive(Args)]
 struct RulesArgs {
     #[command(subcommand)]
-    subcommand: RulesCommand,
+    subcommand: Option<RulesCommand>,
 }
 
 #[derive(Subcommand)]
@@ -129,7 +129,7 @@ enum RulesCommand {
 #[derive(Args)]
 struct VocabRulesArgs {
     #[command(subcommand)]
-    subcommand: VocabRulesCommand,
+    subcommand: Option<VocabRulesCommand>,
 }
 
 #[derive(Subcommand)]
@@ -1296,21 +1296,21 @@ fn main() {
     let data_dir = &cli.data_dir;
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => cmd_serve(data_dir),
-        Command::AppMapping(args) => match args.subcommand {
+        Command::AppMapping(args) => match args.subcommand.unwrap_or(ConfigCommand::Show) {
             ConfigCommand::Show => cmd_config_show(data_dir),
             ConfigCommand::Edit => cmd_config_edit(data_dir),
         },
-        Command::Ps(args) => match args.subcommand {
-            ProcCommand::List(list_args) => match list_args.subcommand {
+        Command::Ps(args) => match args.subcommand.unwrap_or(PsCommand::Show(ShowArgs { subcommand: None })) {
+            PsCommand::Show(list_args) => match list_args.subcommand.unwrap_or(ListCommand::Current) {
                 ListCommand::Current => cmd_proc_list(data_dir),
                 ListCommand::Today => cmd_proc_list_today(data_dir),
             },
-            ProcCommand::Show(a) => cmd_proc_show(data_dir, &a.name, a.duration.as_deref()),
+            PsCommand::Db(a) => cmd_proc_show(data_dir, &a.name, a.duration.as_deref()),
         },
-        Command::Rules(args) => match args.subcommand {
+        Command::Rules(args) => match args.subcommand.unwrap_or(RulesCommand::Show) {
             RulesCommand::Show => cmd_rules_show(data_dir),
             RulesCommand::Edit => cmd_rules_edit(data_dir),
-            RulesCommand::Vocab(vargs) => match vargs.subcommand {
+            RulesCommand::Vocab(vargs) => match vargs.subcommand.unwrap_or(VocabRulesCommand::Show) {
                 VocabRulesCommand::Show => cmd_vocab_rules_show(data_dir),
                 VocabRulesCommand::Edit => cmd_vocab_rules_edit(data_dir),
             },
