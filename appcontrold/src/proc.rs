@@ -20,7 +20,13 @@ pub fn uid_to_username(uid: u32) -> Option<String> {
     let mut result: *mut libc::passwd = std::ptr::null_mut();
 
     let ret = unsafe {
-        libc::getpwuid_r(uid, pwd.as_mut_ptr(), buf.as_mut_ptr(), buf.len(), &mut result)
+        libc::getpwuid_r(
+            uid,
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
     };
 
     if ret != 0 || result.is_null() {
@@ -44,7 +50,13 @@ pub fn uid_to_home_dir(uid: u32) -> Option<String> {
     let mut result: *mut libc::passwd = std::ptr::null_mut();
 
     let ret = unsafe {
-        libc::getpwuid_r(uid, pwd.as_mut_ptr(), buf.as_mut_ptr(), buf.len(), &mut result)
+        libc::getpwuid_r(
+            uid,
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
     };
 
     if ret != 0 || result.is_null() {
@@ -89,9 +101,10 @@ pub fn read_boot_time() -> Result<i64, std::io::Error> {
     let content = fs::read_to_string("/proc/stat")?;
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("btime ") {
-            return rest.trim().parse::<i64>().map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-            });
+            return rest
+                .trim()
+                .parse::<i64>()
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
         }
     }
     Err(std::io::Error::new(

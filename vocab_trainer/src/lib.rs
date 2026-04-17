@@ -94,8 +94,7 @@ pub fn edit_progress(progress_db: &str, words_file: Option<&str>, username: &str
         content.push_str(&format!("{} {count}\n", words::quote_token(word)));
     }
 
-    std::fs::write(&tmp_path, &content)
-        .unwrap_or_else(|e| panic!("cannot write temp file: {e}"));
+    std::fs::write(&tmp_path, &content).unwrap_or_else(|e| panic!("cannot write temp file: {e}"));
 
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
@@ -111,8 +110,8 @@ pub fn edit_progress(progress_db: &str, words_file: Option<&str>, username: &str
         std::process::exit(1);
     }
 
-    let edited = std::fs::read_to_string(&tmp_path)
-        .unwrap_or_else(|e| panic!("cannot read temp file: {e}"));
+    let edited =
+        std::fs::read_to_string(&tmp_path).unwrap_or_else(|e| panic!("cannot read temp file: {e}"));
 
     let mut updated = 0usize;
     for (line_no, raw) in edited.lines().enumerate() {

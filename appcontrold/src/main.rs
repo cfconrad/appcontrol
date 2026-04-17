@@ -6,8 +6,8 @@ mod proc;
 extern crate vocab_trainer;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use notify::notify;
@@ -15,7 +15,7 @@ use rusqlite::Connection;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use db::ActiveProcess;
-use log::{debug, error};
+use log::debug;
 
 type ProcessKey = (u32, i64); // (pid, start_epoch)
 
@@ -180,7 +180,10 @@ fn now_secs() -> i64 {
 
 fn window_start_for_reset(now: i64, reset_behavior: &str) -> i64 {
     use chrono::{Datelike, TimeZone, Utc};
-    let dt = Utc.timestamp_opt(now, 0).single().expect("invalid timestamp");
+    let dt = Utc
+        .timestamp_opt(now, 0)
+        .single()
+        .expect("invalid timestamp");
     let start = match reset_behavior {
         "daily" => dt.date_naive().and_hms_opt(0, 0, 0).unwrap(),
         "weekly" => {
@@ -188,7 +191,12 @@ fn window_start_for_reset(now: i64, reset_behavior: &str) -> i64 {
                 - chrono::Duration::days(dt.weekday().num_days_from_monday() as i64);
             monday.and_hms_opt(0, 0, 0).unwrap()
         }
-        "monthly" => dt.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap(),
+        "monthly" => dt
+            .date_naive()
+            .with_day(1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap(),
         _ => dt.date_naive().and_hms_opt(0, 0, 0).unwrap(),
     };
     start.and_utc().timestamp()
@@ -196,7 +204,6 @@ fn window_start_for_reset(now: i64, reset_behavior: &str) -> i64 {
 
 struct ExceededGroup {
     group_name: String,
-    total_secs: i64,
     limit_mins: i64,
     reset_behavior: String,
     /// Per-app usage within the window, sorted by descending duration.
@@ -230,7 +237,10 @@ fn check_limit_rules(
         let records = match db::list_processes_active_today(data_conn, window_start, now) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("appmon: error querying window for rule {:?}: {e}", rule.group_name);
+                eprintln!(
+                    "appmon: error querying window for rule {:?}: {e}",
+                    rule.group_name
+                );
                 continue;
             }
         };
@@ -263,7 +273,6 @@ fn check_limit_rules(
             app_usage.sort_by(|a, b| b.1.cmp(&a.1));
             exceeded.push(ExceededGroup {
                 group_name: rule.group_name.clone(),
-                total_secs,
                 limit_mins: rule.limit,
                 reset_behavior: rule.reset_behavior.clone(),
                 app_usage,
@@ -275,16 +284,18 @@ fn check_limit_rules(
 }
 
 fn cmd_serve(data_dir: &std::path::Path) {
-    let config_path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
-    let data_path   = data_dir.join("appmon.db").to_string_lossy().into_owned();
+    let config_path = data_dir
+        .join("appmon_config.db")
+        .to_string_lossy()
+        .into_owned();
+    let data_path = data_dir.join("appmon.db").to_string_lossy().into_owned();
 
     let config_conn = config::open_config_db(&config_path)
         .unwrap_or_else(|e| panic!("cannot open config DB {config_path:?}: {e}"));
     let data_conn = db::open_db(&data_path)
         .unwrap_or_else(|e| panic!("cannot open data DB {data_path:?}: {e}"));
 
-    let boot_time = proc::read_boot_time()
-        .unwrap_or_else(|e| panic!("cannot read boot time: {e}"));
+    let boot_time = proc::read_boot_time().unwrap_or_else(|e| panic!("cannot read boot time: {e}"));
     let clk_tck = proc::get_clk_tck();
 
     let boot_id = db::get_or_create_boot_session(&data_conn, boot_time)
@@ -324,7 +335,10 @@ fn cmd_serve(data_dir: &std::path::Path) {
         }
     }
 
-    eprintln!("appmon: tracking {} already-running processes", active.len());
+    eprintln!(
+        "appmon: tracking {} already-running processes",
+        active.len()
+    );
 
     let mut next = now_secs();
     while running.load(Ordering::SeqCst) {
@@ -338,15 +352,28 @@ fn cmd_serve(data_dir: &std::path::Path) {
 
         // Reload whitelist, entries, rules, and vocab rules every 30 seconds.
         whitelist = config::load_whitelist(&config_conn);
-        let whitelist_entries = config::list_whitelist_entries(&config_conn)
-            .unwrap_or_else(|e| { eprintln!("appmon: cannot reload whitelist entries: {e}"); vec![] });
-        let rules = config::list_rules(&config_conn)
-            .unwrap_or_else(|e| { eprintln!("appmon: cannot reload rules: {e}"); vec![] });
-        let vocab_rules = config::list_vocab_rules(&config_conn)
-            .unwrap_or_else(|e| { eprintln!("appmon: cannot reload vocab rules: {e}"); vec![] });
+        let whitelist_entries = config::list_whitelist_entries(&config_conn).unwrap_or_else(|e| {
+            eprintln!("appmon: cannot reload whitelist entries: {e}");
+            vec![]
+        });
+        let rules = config::list_rules(&config_conn).unwrap_or_else(|e| {
+            eprintln!("appmon: cannot reload rules: {e}");
+            vec![]
+        });
+        let vocab_rules = config::list_vocab_rules(&config_conn).unwrap_or_else(|e| {
+            eprintln!("appmon: cannot reload vocab rules: {e}");
+            vec![]
+        });
 
         // Check limit rules every cycle (credits already subtracted inside).
-        let exceeded = check_limit_rules(&data_conn, &config_conn, &rules, &whitelist_entries, &vocab_rules, now);
+        let exceeded = check_limit_rules(
+            &data_conn,
+            &config_conn,
+            &rules,
+            &whitelist_entries,
+            &vocab_rules,
+            now,
+        );
 
         // Build current set
         let snapshots = proc::enumerate_processes(boot_time, clk_tck);
@@ -381,7 +408,8 @@ fn cmd_serve(data_dir: &std::path::Path) {
                 if patterns.iter().any(|re| re.is_match(&snap.name))
                     && notified_uids.insert(snap.uid)
                 {
-                    let app_used = eg.app_usage
+                    let app_used = eg
+                        .app_usage
                         .iter()
                         .find(|(name, _)| name == &snap.name)
                         .map(|(_, secs)| *secs)
@@ -395,7 +423,6 @@ fn cmd_serve(data_dir: &std::path::Path) {
                             eg.group_name.clone(),
                             vr.clone(),
                             config_path.clone(),
-                            data_dir.to_string_lossy().into_owned(),
                         );
                     } else {
                         let msg = format!(
@@ -451,7 +478,10 @@ fn cmd_serve(data_dir: &std::path::Path) {
     for (_key, ap) in active {
         let duration = now - ap.start_epoch;
         if let Err(e) = db::finalize_process(&data_conn, ap.db_id, now, duration) {
-            eprintln!("appmon: shutdown finalize error for db_id {}: {e}", ap.db_id);
+            eprintln!(
+                "appmon: shutdown finalize error for db_id {}: {e}",
+                ap.db_id
+            );
         }
     }
 
@@ -459,7 +489,10 @@ fn cmd_serve(data_dir: &std::path::Path) {
 }
 
 fn cmd_config_show(data_dir: &std::path::Path) {
-    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+    let path = data_dir
+        .join("appmon_config.db")
+        .to_string_lossy()
+        .into_owned();
     let conn = config::open_config_db(&path)
         .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
     let entries = config::list_whitelist_entries(&conn)
@@ -470,7 +503,10 @@ fn cmd_config_show(data_dir: &std::path::Path) {
         return;
     }
 
-    println!("{:<4}  {:<7}  {:<16}  {:<16}  pattern", "id", "enabled", "user", "group");
+    println!(
+        "{:<4}  {:<7}  {:<16}  {:<16}  pattern",
+        "id", "enabled", "user", "group"
+    );
     println!("{}", "-".repeat(72));
     for e in &entries {
         let user = e.uid.map_or("*".to_string(), |u| {
@@ -488,7 +524,10 @@ fn cmd_config_show(data_dir: &std::path::Path) {
 }
 
 fn cmd_config_edit(data_dir: &std::path::Path) {
-    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+    let path = data_dir
+        .join("appmon_config.db")
+        .to_string_lossy()
+        .into_owned();
     let conn = config::open_config_db(&path)
         .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
 
@@ -511,13 +550,15 @@ fn cmd_config_edit(data_dir: &std::path::Path) {
         if e.enabled {
             content.push_str(&format!("{} {} {}", user, e.group_name, e.pattern));
         } else {
-            content.push_str(&format!("# (disabled) {} {} {}", user, e.group_name, e.pattern));
+            content.push_str(&format!(
+                "# (disabled) {} {} {}",
+                user, e.group_name, e.pattern
+            ));
         }
         content.push('\n');
     }
 
-    std::fs::write(tmp_path, &content)
-        .unwrap_or_else(|e| panic!("cannot write temp file: {e}"));
+    std::fs::write(tmp_path, &content).unwrap_or_else(|e| panic!("cannot write temp file: {e}"));
 
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
@@ -533,8 +574,8 @@ fn cmd_config_edit(data_dir: &std::path::Path) {
         std::process::exit(1);
     }
 
-    let edited = std::fs::read_to_string(tmp_path)
-        .unwrap_or_else(|e| panic!("cannot read temp file: {e}"));
+    let edited =
+        std::fs::read_to_string(tmp_path).unwrap_or_else(|e| panic!("cannot read temp file: {e}"));
 
     let mut valid_patterns: Vec<config::WhitelistPattern> = Vec::new();
     for line in edited.lines() {
@@ -551,14 +592,18 @@ fn cmd_config_edit(data_dir: &std::path::Path) {
         let group_part = match fields.next() {
             Some(f) => f,
             None => {
-                eprintln!("appmon: skipping malformed entry (expected: user group pattern): {line:?}");
+                eprintln!(
+                    "appmon: skipping malformed entry (expected: user group pattern): {line:?}"
+                );
                 continue;
             }
         };
         let pat = match fields.next().map(str::trim) {
             Some(f) if !f.is_empty() => f,
             _ => {
-                eprintln!("appmon: skipping malformed entry (expected: user group pattern): {line:?}");
+                eprintln!(
+                    "appmon: skipping malformed entry (expected: user group pattern): {line:?}"
+                );
                 continue;
             }
         };
@@ -585,7 +630,10 @@ fn cmd_config_edit(data_dir: &std::path::Path) {
     config::set_whitelist_patterns(&conn, &valid_patterns)
         .unwrap_or_else(|e| panic!("cannot update whitelist: {e}"));
 
-    println!("appmon: whitelist updated ({} pattern(s))", valid_patterns.len());
+    println!(
+        "appmon: whitelist updated ({} pattern(s))",
+        valid_patterns.len()
+    );
 
     let _ = std::fs::remove_file(tmp_path);
 }
@@ -599,8 +647,7 @@ fn format_duration(secs: i64) -> String {
 
 fn cmd_proc_list_today(data_dir: &std::path::Path) {
     let path = data_dir.join("appmon.db").to_string_lossy().into_owned();
-    let conn = db::open_db(&path)
-        .unwrap_or_else(|e| panic!("cannot open data DB {path:?}: {e}"));
+    let conn = db::open_db(&path).unwrap_or_else(|e| panic!("cannot open data DB {path:?}: {e}"));
 
     let now = now_secs();
     let today_start = now - (now % 86400);
@@ -637,16 +684,17 @@ fn cmd_proc_show(data_dir: &std::path::Path, name: &str, duration: Option<&str>)
 
     let since: Option<i64> = match duration {
         Some(d) => {
-            let secs = parse_duration_secs(d)
-                .unwrap_or_else(|e| { eprintln!("appmon: {e}"); std::process::exit(1); });
+            let secs = parse_duration_secs(d).unwrap_or_else(|e| {
+                eprintln!("appmon: {e}");
+                std::process::exit(1);
+            });
             Some(now_secs() - secs)
         }
         None => None,
     };
 
     let path = data_dir.join("appmon.db").to_string_lossy().into_owned();
-    let conn = db::open_db(&path)
-        .unwrap_or_else(|e| panic!("cannot open data DB {path:?}: {e}"));
+    let conn = db::open_db(&path).unwrap_or_else(|e| panic!("cannot open data DB {path:?}: {e}"));
 
     let records = db::list_entries_by_name(&conn, name, since)
         .unwrap_or_else(|e| panic!("cannot read entries: {e}"));
@@ -667,11 +715,11 @@ fn cmd_proc_show(data_dir: &std::path::Path, name: &str, duration: Option<&str>)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                 .unwrap_or_else(|| ts.to_string())
         };
-        let user = proc::uid_to_username(r.uid)
-            .unwrap_or_else(|| r.uid.to_string());
+        let user = proc::uid_to_username(r.uid).unwrap_or_else(|| r.uid.to_string());
         let start = fmt(r.start_time);
         let end = r.end_time.map(fmt).unwrap_or_else(|| "running".to_string());
-        let duration = r.duration_seconds
+        let duration = r
+            .duration_seconds
             .map(format_duration)
             .unwrap_or_else(|| "-".to_string());
         let cmdline = if r.cmdline.len() > 30 {
@@ -688,7 +736,10 @@ fn cmd_proc_show(data_dir: &std::path::Path, name: &str, duration: Option<&str>)
 
 fn cmd_proc_list(data_dir: &std::path::Path) {
     let data_path = data_dir.join("appmon.db").to_string_lossy().into_owned();
-    let config_path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+    let config_path = data_dir
+        .join("appmon_config.db")
+        .to_string_lossy()
+        .into_owned();
 
     let data_conn = db::open_db(&data_path)
         .unwrap_or_else(|e| panic!("cannot open data DB {data_path:?}: {e}"));
@@ -705,12 +756,18 @@ fn cmd_proc_list(data_dir: &std::path::Path) {
 
     let now = now_secs();
 
-    let whitelist_entries = config::list_whitelist_entries(&config_conn)
-        .unwrap_or_else(|e| { eprintln!("appmon: cannot load whitelist entries: {e}"); vec![] });
-    let rules = config::list_rules(&config_conn)
-        .unwrap_or_else(|e| { eprintln!("appmon: cannot load rules: {e}"); vec![] });
-    let vocab_rules = config::list_vocab_rules(&config_conn)
-        .unwrap_or_else(|e| { eprintln!("appmon: cannot load vocab rules: {e}"); vec![] });
+    let whitelist_entries = config::list_whitelist_entries(&config_conn).unwrap_or_else(|e| {
+        eprintln!("appmon: cannot load whitelist entries: {e}");
+        vec![]
+    });
+    let rules = config::list_rules(&config_conn).unwrap_or_else(|e| {
+        eprintln!("appmon: cannot load rules: {e}");
+        vec![]
+    });
+    let vocab_rules = config::list_vocab_rules(&config_conn).unwrap_or_else(|e| {
+        eprintln!("appmon: cannot load vocab rules: {e}");
+        vec![]
+    });
 
     // Compute used seconds and vocab credits per rule group within its reset window.
     // group_name -> (raw_used_secs, limit_mins, extra_secs)
@@ -725,8 +782,8 @@ fn cmd_proc_list(data_dir: &std::path::Path) {
         if patterns.is_empty() {
             continue;
         }
-        let today_records = db::list_processes_active_today(&data_conn, window_start, now)
-            .unwrap_or_default();
+        let today_records =
+            db::list_processes_active_today(&data_conn, window_start, now).unwrap_or_default();
         let mut total_secs: i64 = 0;
         for tr in &today_records {
             if patterns.iter().any(|re| re.is_match(&tr.name)) {
@@ -743,14 +800,21 @@ fn cmd_proc_list(data_dir: &std::path::Path) {
                 config::sum_credits_since(&config_conn, vr.id, since).unwrap_or(0)
             })
             .sum();
-        group_usage.insert(rule.group_name.clone(), (total_secs, rule.limit, extra_secs));
+        group_usage.insert(
+            rule.group_name.clone(),
+            (total_secs, rule.limit, extra_secs),
+        );
     }
 
     // Compiled patterns for matching a process name to its group.
     let name_to_group: Vec<(regex::Regex, String)> = whitelist_entries
         .iter()
         .filter(|e| e.enabled && !e.group_name.is_empty())
-        .filter_map(|e| regex::Regex::new(&e.pattern).ok().map(|re| (re, e.group_name.clone())))
+        .filter_map(|e| {
+            regex::Regex::new(&e.pattern)
+                .ok()
+                .map(|re| (re, e.group_name.clone()))
+        })
         .collect();
 
     println!(
@@ -811,11 +875,11 @@ fn parse_duration_secs(s: &str) -> Result<i64, String> {
         .map_err(|_| format!("invalid number in duration {s:?}"))?;
     let secs = match suffix {
         "s" | "" => n,
-        "d"      => n * 86_400,
-        "w"      => n * 7 * 86_400,
-        "m"      => n * 30 * 86_400,
-        "y"      => n * 365 * 86_400,
-        other    => return Err(format!("unknown duration unit {other:?} (use s/d/w/m/y)")),
+        "d" => n * 86_400,
+        "w" => n * 7 * 86_400,
+        "m" => n * 30 * 86_400,
+        "y" => n * 365 * 86_400,
+        other => return Err(format!("unknown duration unit {other:?} (use s/d/w/m/y)")),
     };
     Ok(secs)
 }
@@ -828,13 +892,21 @@ fn parse_limit(s: &str) -> Result<i64, String> {
             continue;
         }
         if let Some(h) = term.strip_suffix('h') {
-            let hours: i64 = h.trim().parse().map_err(|_| format!("invalid hours value: {h:?}"))?;
+            let hours: i64 = h
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid hours value: {h:?}"))?;
             total += hours * 60;
         } else if let Some(m) = term.strip_suffix('m') {
-            let mins: i64 = m.trim().parse().map_err(|_| format!("invalid minutes value: {m:?}"))?;
+            let mins: i64 = m
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid minutes value: {m:?}"))?;
             total += mins;
         } else {
-            let mins: i64 = term.parse().map_err(|_| format!("invalid limit value: {term:?}"))?;
+            let mins: i64 = term
+                .parse()
+                .map_err(|_| format!("invalid limit value: {term:?}"))?;
             total += mins;
         }
     }
@@ -855,11 +927,13 @@ fn format_limit(minutes: i64) -> String {
 }
 
 fn cmd_rules_show(data_dir: &std::path::Path) {
-    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+    let path = data_dir
+        .join("appmon_config.db")
+        .to_string_lossy()
+        .into_owned();
     let conn = config::open_config_db(&path)
         .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
-    let rules = config::list_rules(&conn)
-        .unwrap_or_else(|e| panic!("cannot read rules: {e}"));
+    let rules = config::list_rules(&conn).unwrap_or_else(|e| panic!("cannot read rules: {e}"));
 
     if rules.is_empty() {
         println!("no rules defined");
@@ -880,11 +954,13 @@ fn cmd_rules_show(data_dir: &std::path::Path) {
 }
 
 fn cmd_rules_edit(data_dir: &std::path::Path) {
-    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+    let path = data_dir
+        .join("appmon_config.db")
+        .to_string_lossy()
+        .into_owned();
     let conn = config::open_config_db(&path)
         .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
-    let rules = config::list_rules(&conn)
-        .unwrap_or_else(|e| panic!("cannot read rules: {e}"));
+    let rules = config::list_rules(&conn).unwrap_or_else(|e| panic!("cannot read rules: {e}"));
 
     let tmp_path = "/tmp/appmon_rules_edit.txt";
 
@@ -904,8 +980,7 @@ fn cmd_rules_edit(data_dir: &std::path::Path) {
         ));
     }
 
-    std::fs::write(tmp_path, &content)
-        .unwrap_or_else(|e| panic!("cannot write temp file: {e}"));
+    std::fs::write(tmp_path, &content).unwrap_or_else(|e| panic!("cannot write temp file: {e}"));
 
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
@@ -921,8 +996,8 @@ fn cmd_rules_edit(data_dir: &std::path::Path) {
         std::process::exit(1);
     }
 
-    let edited = std::fs::read_to_string(tmp_path)
-        .unwrap_or_else(|e| panic!("cannot read temp file: {e}"));
+    let edited =
+        std::fs::read_to_string(tmp_path).unwrap_or_else(|e| panic!("cannot read temp file: {e}"));
 
     let mut valid_rules: Vec<config::Rule> = Vec::new();
     for line in edited.lines() {
@@ -939,19 +1014,25 @@ fn cmd_rules_edit(data_dir: &std::path::Path) {
         let reset = match fields.next() {
             Some(f) => f.trim(),
             None => {
-                eprintln!("appmon: skipping malformed rule (expected: group reset limit): {line:?}");
+                eprintln!(
+                    "appmon: skipping malformed rule (expected: group reset limit): {line:?}"
+                );
                 continue;
             }
         };
         let limit_str = match fields.next().map(str::trim) {
             Some(f) if !f.is_empty() => f,
             _ => {
-                eprintln!("appmon: skipping malformed rule (expected: group reset limit): {line:?}");
+                eprintln!(
+                    "appmon: skipping malformed rule (expected: group reset limit): {line:?}"
+                );
                 continue;
             }
         };
         if !matches!(reset, "daily" | "weekly" | "monthly") {
-            eprintln!("appmon: skipping rule with invalid reset {reset:?} (expected daily/weekly/monthly): {line:?}");
+            eprintln!(
+                "appmon: skipping rule with invalid reset {reset:?} (expected daily/weekly/monthly): {line:?}"
+            );
             continue;
         }
         let limit = match parse_limit(limit_str) {
@@ -969,8 +1050,7 @@ fn cmd_rules_edit(data_dir: &std::path::Path) {
         });
     }
 
-    config::set_rules(&conn, &valid_rules)
-        .unwrap_or_else(|e| panic!("cannot update rules: {e}"));
+    config::set_rules(&conn, &valid_rules).unwrap_or_else(|e| panic!("cannot update rules: {e}"));
 
     println!("appmon: rules updated ({} rule(s))", valid_rules.len());
 
@@ -982,11 +1062,14 @@ fn cmd_rules_edit(data_dir: &std::path::Path) {
 // ---------------------------------------------------------------------------
 
 fn cmd_vocab_rules_show(data_dir: &std::path::Path) {
-    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+    let path = data_dir
+        .join("appmon_config.db")
+        .to_string_lossy()
+        .into_owned();
     let conn = config::open_config_db(&path)
         .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
-    let rules = config::list_vocab_rules(&conn)
-        .unwrap_or_else(|e| panic!("cannot read vocab rules: {e}"));
+    let rules =
+        config::list_vocab_rules(&conn).unwrap_or_else(|e| panic!("cannot read vocab rules: {e}"));
 
     if rules.is_empty() {
         println!("no vocab rules defined");
@@ -1007,11 +1090,14 @@ fn cmd_vocab_rules_show(data_dir: &std::path::Path) {
 }
 
 fn cmd_vocab_rules_edit(data_dir: &std::path::Path) {
-    let path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+    let path = data_dir
+        .join("appmon_config.db")
+        .to_string_lossy()
+        .into_owned();
     let conn = config::open_config_db(&path)
         .unwrap_or_else(|e| panic!("cannot open config DB {path:?}: {e}"));
-    let rules = config::list_vocab_rules(&conn)
-        .unwrap_or_else(|e| panic!("cannot read vocab rules: {e}"));
+    let rules =
+        config::list_vocab_rules(&conn).unwrap_or_else(|e| panic!("cannot read vocab rules: {e}"));
 
     let tmp_path = "/tmp/appmon_vocab_rules_edit.txt";
 
@@ -1031,8 +1117,7 @@ fn cmd_vocab_rules_edit(data_dir: &std::path::Path) {
         ));
     }
 
-    std::fs::write(tmp_path, &content)
-        .unwrap_or_else(|e| panic!("cannot write temp file: {e}"));
+    std::fs::write(tmp_path, &content).unwrap_or_else(|e| panic!("cannot write temp file: {e}"));
 
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
@@ -1048,8 +1133,8 @@ fn cmd_vocab_rules_edit(data_dir: &std::path::Path) {
         std::process::exit(1);
     }
 
-    let edited = std::fs::read_to_string(tmp_path)
-        .unwrap_or_else(|e| panic!("cannot read temp file: {e}"));
+    let edited =
+        std::fs::read_to_string(tmp_path).unwrap_or_else(|e| panic!("cannot read temp file: {e}"));
 
     let mut valid_rules: Vec<config::VocabRule> = Vec::new();
     for line in edited.lines() {
@@ -1066,7 +1151,9 @@ fn cmd_vocab_rules_edit(data_dir: &std::path::Path) {
         let correct_str = match fields.next().map(str::trim) {
             Some(f) if !f.is_empty() => f,
             _ => {
-                eprintln!("appmon: skipping malformed vocab rule (expected: group correct extra-minutes reset-time words-file): {line:?}");
+                eprintln!(
+                    "appmon: skipping malformed vocab rule (expected: group correct extra-minutes reset-time words-file): {line:?}"
+                );
                 continue;
             }
         };
@@ -1080,7 +1167,9 @@ fn cmd_vocab_rules_edit(data_dir: &std::path::Path) {
         let reset_time = match fields.next().map(str::trim) {
             Some(f) if matches!(f, "daily" | "weekly" | "monthly") => f,
             Some(other) => {
-                eprintln!("appmon: skipping vocab rule with invalid reset-time {other:?} (expected daily, weekly, or monthly): {line:?}");
+                eprintln!(
+                    "appmon: skipping vocab rule with invalid reset-time {other:?} (expected daily, weekly, or monthly): {line:?}"
+                );
                 continue;
             }
             _ => {
@@ -1105,7 +1194,9 @@ fn cmd_vocab_rules_edit(data_dir: &std::path::Path) {
         let extra_minutes: i64 = match extra_str.parse() {
             Ok(v) if v > 0 => v,
             _ => {
-                eprintln!("appmon: skipping vocab rule with invalid extra-minutes value {extra_str:?}");
+                eprintln!(
+                    "appmon: skipping vocab rule with invalid extra-minutes value {extra_str:?}"
+                );
                 continue;
             }
         };
@@ -1122,7 +1213,10 @@ fn cmd_vocab_rules_edit(data_dir: &std::path::Path) {
     config::set_vocab_rules(&conn, &valid_rules)
         .unwrap_or_else(|e| panic!("cannot update vocab rules: {e}"));
 
-    println!("appmon: vocab rules updated ({} rule(s))", valid_rules.len());
+    println!(
+        "appmon: vocab rules updated ({} rule(s))",
+        valid_rules.len()
+    );
 
     let _ = std::fs::remove_file(tmp_path);
 }
@@ -1132,8 +1226,7 @@ fn cmd_vocab_rules_edit(data_dir: &std::path::Path) {
 // ---------------------------------------------------------------------------
 
 fn progress_db_path(_data_dir: &std::path::Path, uid: u32) -> String {
-    let home = proc::uid_to_home_dir(uid)
-        .unwrap_or_else(|| format!("/tmp/appcontrol_uid_{uid}"));
+    let home = proc::uid_to_home_dir(uid).unwrap_or_else(|| format!("/tmp/appcontrol_uid_{uid}"));
     format!("{home}/.local/share/appcontrol/vocab_progress.db")
 }
 
@@ -1165,17 +1258,18 @@ fn cmd_vocab_edit(data_dir: &std::path::Path, username: &str, words_file: Option
     let effective_words_file = if words_file.is_some() {
         words_file
     } else {
-        let config_path = data_dir.join("appmon_config.db").to_string_lossy().into_owned();
+        let config_path = data_dir
+            .join("appmon_config.db")
+            .to_string_lossy()
+            .into_owned();
         if let Ok(conn) = config::open_config_db(&config_path) {
             if let Ok(rules) = config::list_vocab_rules(&conn) {
                 derived_words_file = rules.into_iter().next().map(|r| r.words_file);
                 derived_words_file.as_deref()
             } else {
-                derived_words_file = None;
                 None
             }
         } else {
-            derived_words_file = None;
             None
         }
     };
@@ -1193,8 +1287,8 @@ fn main() {
         log::LevelFilter::Debug
     } else {
         match cli.log_level {
-            LogLevel::Warn  => log::LevelFilter::Warn,
-            LogLevel::Info  => log::LevelFilter::Info,
+            LogLevel::Warn => log::LevelFilter::Warn,
+            LogLevel::Info => log::LevelFilter::Info,
             LogLevel::Debug => log::LevelFilter::Debug,
         }
     };
@@ -1223,9 +1317,7 @@ fn main() {
         },
         Command::Vocab(args) => match args.subcommand {
             VocabCommand::List(a) => cmd_vocab_list(data_dir, &a.user),
-            VocabCommand::Edit(a) => {
-                cmd_vocab_edit(data_dir, &a.user, a.words_file.as_deref())
-            }
+            VocabCommand::Edit(a) => cmd_vocab_edit(data_dir, &a.user, a.words_file.as_deref()),
         },
     }
 }

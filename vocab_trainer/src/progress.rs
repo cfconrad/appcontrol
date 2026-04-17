@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use rusqlite::{params, Connection, Result};
+use rusqlite::{Connection, Result, params};
 
 /// Open (or create) the progress database at `path`.
 pub fn open_progress_db(path: &str) -> Result<Connection> {
@@ -22,8 +22,7 @@ pub fn open_progress_db(path: &str) -> Result<Connection> {
 /// Load all (word → correct_count) pairs for `username`.
 /// Words not yet in the DB are simply absent (treat as 0).
 pub fn load_progress(conn: &Connection, username: &str) -> HashMap<String, u32> {
-    let mut stmt = match conn
-        .prepare("SELECT word, correct FROM word_progress WHERE username = ?1")
+    let mut stmt = match conn.prepare("SELECT word, correct FROM word_progress WHERE username = ?1")
     {
         Ok(s) => s,
         Err(_) => return HashMap::new(),

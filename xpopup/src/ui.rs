@@ -197,8 +197,7 @@ pub(crate) fn popup_ui(ctx: &egui::Context, state: &mut PopupState) -> Option<i3
         .frame(egui::Frame::none())
         .show(ctx, |ui| {
             let center = screen_rect.center();
-            let square_rect =
-                Rect::from_center_size(center, Vec2::new(FRAME_WIDTH, frame_height));
+            let square_rect = Rect::from_center_size(center, Vec2::new(FRAME_WIDTH, frame_height));
 
             ui.painter().rect(
                 square_rect,

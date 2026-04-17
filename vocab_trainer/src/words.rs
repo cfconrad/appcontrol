@@ -36,7 +36,10 @@ pub fn parse_words_file(path: &str) -> Result<Vec<VocabEntry>, String> {
         let eq_pos = match line.find('=') {
             Some(p) => p,
             None => {
-                eprintln!("vocab: line {} missing '=', skipping: {line:?}", line_no + 1);
+                eprintln!(
+                    "vocab: line {} missing '=', skipping: {line:?}",
+                    line_no + 1
+                );
                 continue;
             }
         };
@@ -63,7 +66,11 @@ pub fn parse_words_file(path: &str) -> Result<Vec<VocabEntry>, String> {
         let correct = rhs[0].clone();
         let wrong = rhs[1..].to_vec();
 
-        entries.push(VocabEntry { word, correct, wrong });
+        entries.push(VocabEntry {
+            word,
+            correct,
+            wrong,
+        });
     }
 
     if entries.is_empty() {

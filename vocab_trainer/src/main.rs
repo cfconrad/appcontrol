@@ -2,7 +2,10 @@ use clap::{Args, Parser, Subcommand};
 use vocab_trainer::QuizConfig;
 
 #[derive(Parser)]
-#[command(name = "vocab_trainer", about = "Vocabulary trainer with spaced repetition")]
+#[command(
+    name = "vocab_trainer",
+    about = "Vocabulary trainer with spaced repetition"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -92,11 +95,7 @@ fn main() {
             vocab_trainer::print_progress(&a.progress_db, &a.user);
         }
         Command::Edit(a) => {
-            vocab_trainer::edit_progress(
-                &a.progress_db,
-                a.words_file.as_deref(),
-                &a.user,
-            );
+            vocab_trainer::edit_progress(&a.progress_db, a.words_file.as_deref(), &a.user);
         }
     }
 }

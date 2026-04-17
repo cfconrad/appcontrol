@@ -49,15 +49,18 @@ pub fn get_or_create_boot_session(conn: &Connection, boot_time: i64) -> Result<i
     )
 }
 
-pub fn insert_process(
-    conn: &Connection,
-    boot_id: i64,
-    snap: &ProcSnapshot,
-) -> Result<i64> {
+pub fn insert_process(conn: &Connection, boot_id: i64, snap: &ProcSnapshot) -> Result<i64> {
     conn.execute(
         "INSERT INTO processes (boot_id, pid, uid, name, cmdline, start_time)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![boot_id, snap.pid, snap.uid, snap.name, snap.cmdline, snap.start_epoch],
+        rusqlite::params![
+            boot_id,
+            snap.pid,
+            snap.uid,
+            snap.name,
+            snap.cmdline,
+            snap.start_epoch
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -127,7 +130,6 @@ pub struct EntryRecord {
     pub id: i64,
     pub pid: u32,
     pub uid: u32,
-    pub name: String,
     pub cmdline: String,
     pub start_time: i64,
     pub end_time: Option<i64>,
@@ -143,7 +145,7 @@ pub fn list_entries_by_name(
 ) -> Result<Vec<EntryRecord>> {
     let cutoff = since.unwrap_or(0);
     let mut stmt = conn.prepare(
-        "SELECT id, pid, uid, name, cmdline, start_time, end_time, duration_seconds
+        "SELECT id, pid, uid, cmdline, start_time, end_time, duration_seconds
          FROM processes
          WHERE name = ?1
            AND start_time >= ?2
@@ -155,11 +157,10 @@ pub fn list_entries_by_name(
                 id: row.get(0)?,
                 pid: row.get(1)?,
                 uid: row.get(2)?,
-                name: row.get(3)?,
-                cmdline: row.get(4)?,
-                start_time: row.get(5)?,
-                end_time: row.get(6)?,
-                duration_seconds: row.get(7)?,
+                cmdline: row.get(3)?,
+                start_time: row.get(4)?,
+                end_time: row.get(5)?,
+                duration_seconds: row.get(6)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -167,12 +168,7 @@ pub fn list_entries_by_name(
     Ok(records)
 }
 
-pub fn finalize_process(
-    conn: &Connection,
-    db_id: i64,
-    end_time: i64,
-    duration: i64,
-) -> Result<()> {
+pub fn finalize_process(conn: &Connection, db_id: i64, end_time: i64, duration: i64) -> Result<()> {
     conn.execute(
         "UPDATE processes SET end_time = ?1, duration_seconds = ?2 WHERE id = ?3",
         rusqlite::params![end_time, duration, db_id],

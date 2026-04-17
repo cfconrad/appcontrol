@@ -3,23 +3,18 @@ use egui_wgpu::wgpu;
 use raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
 use std::ptr::NonNull;
 use wayland_client::{
-    protocol::{
-        wl_compositor::WlCompositor,
-        wl_output::WlOutput,
-        wl_pointer::WlPointer,
-        wl_registry::WlRegistry,
-        wl_seat::WlSeat,
-        wl_surface::WlSurface,
-    },
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
+    protocol::{
+        wl_compositor::WlCompositor, wl_output::WlOutput, wl_pointer::WlPointer,
+        wl_registry::WlRegistry, wl_seat::WlSeat, wl_surface::WlSurface,
+    },
 };
 use wayland_protocols::ext::session_lock::v1::client::{
     ext_session_lock_manager_v1::ExtSessionLockManagerV1,
-    ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
-    ext_session_lock_v1::ExtSessionLockV1,
+    ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, ext_session_lock_v1::ExtSessionLockV1,
 };
 
-use crate::ui::{popup_ui, PopupState};
+use crate::ui::{PopupState, popup_ui};
 
 pub(crate) struct SurfaceState {
     pub wl_surface: WlSurface,
@@ -86,25 +81,31 @@ impl Dispatch<WlRegistry, ()> for LockState {
         qh: &QueueHandle<Self>,
     ) {
         use wayland_client::protocol::wl_registry::Event;
-        if let Event::Global { name, interface, version } = event {
+        if let Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             match interface.as_str() {
                 "wl_compositor" => {
                     state.compositor =
                         Some(registry.bind::<WlCompositor, _, _>(name, version.min(4), qh, ()));
                 }
                 "ext_session_lock_manager_v1" => {
-                    state.lock_manager = Some(
-                        registry.bind::<ExtSessionLockManagerV1, _, _>(name, 1, qh, ()),
-                    );
+                    state.lock_manager =
+                        Some(registry.bind::<ExtSessionLockManagerV1, _, _>(name, 1, qh, ()));
                 }
                 "wl_output" => {
-                    state.outputs.push(
-                        registry.bind::<WlOutput, _, _>(name, version.min(4), qh, ()),
-                    );
+                    state.outputs.push(registry.bind::<WlOutput, _, _>(
+                        name,
+                        version.min(4),
+                        qh,
+                        (),
+                    ));
                 }
                 "wl_seat" => {
-                    state.seat =
-                        Some(registry.bind::<WlSeat, _, _>(name, version.min(8), qh, ()));
+                    state.seat = Some(registry.bind::<WlSeat, _, _>(name, version.min(8), qh, ()));
                 }
                 _ => {}
             }
@@ -147,7 +148,10 @@ impl Dispatch<WlSeat, ()> for LockState {
         qh: &QueueHandle<Self>,
     ) {
         use wayland_client::protocol::wl_seat::{Capability, Event};
-        if let Event::Capabilities { capabilities: WEnum::Value(caps) } = event {
+        if let Event::Capabilities {
+            capabilities: WEnum::Value(caps),
+        } = event
+        {
             if caps.contains(Capability::Pointer) && state.pointer.is_none() {
                 state.pointer = Some(seat.get_pointer(qh, ()));
             }
@@ -166,7 +170,12 @@ impl Dispatch<WlPointer, ()> for LockState {
     ) {
         use wayland_client::protocol::wl_pointer::{ButtonState, Event};
         match event {
-            Event::Enter { surface, surface_x, surface_y, .. } => {
+            Event::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } => {
                 state.active_surface = state
                     .surfaces
                     .iter()
@@ -181,13 +190,21 @@ impl Dispatch<WlPointer, ()> for LockState {
                 state.events.push(egui::Event::PointerGone);
                 state.needs_render = true;
             }
-            Event::Motion { surface_x, surface_y, .. } => {
+            Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
                 let pos = egui::pos2(surface_x as f32, surface_y as f32);
                 state.pointer_pos = pos;
                 state.events.push(egui::Event::PointerMoved(pos));
                 state.needs_render = true;
             }
-            Event::Button { button, state: WEnum::Value(btn_state), .. } => {
+            Event::Button {
+                button,
+                state: WEnum::Value(btn_state),
+                ..
+            } => {
                 if button == 0x110 {
                     // BTN_LEFT
                     let pressed = btn_state == ButtonState::Pressed;
@@ -260,7 +277,12 @@ impl Dispatch<ExtSessionLockSurfaceV1, usize> for LockState {
         _: &QueueHandle<Self>,
     ) {
         use wayland_protocols::ext::session_lock::v1::client::ext_session_lock_surface_v1::Event;
-        if let Event::Configure { serial, width, height } = event {
+        if let Event::Configure {
+            serial,
+            width,
+            height,
+        } = event
+        {
             if let Some(surf) = state.surfaces.get_mut(idx) {
                 surf.width = width;
                 surf.height = height;
@@ -286,7 +308,9 @@ pub(crate) fn run_wayland_locked(
     conn.display().get_registry(&qh, ());
 
     let mut state = LockState::new();
-    queue.roundtrip(&mut state).expect("xpopup: Wayland roundtrip failed");
+    queue
+        .roundtrip(&mut state)
+        .expect("xpopup: Wayland roundtrip failed");
 
     if state.outputs.is_empty() {
         eprintln!("xpopup: no Wayland outputs found");
@@ -309,7 +333,9 @@ pub(crate) fn run_wayland_locked(
         .take()
         .expect("xpopup: compositor does not support ext-session-lock-v1");
     let lock = manager.lock(&qh, ());
-    queue.roundtrip(&mut state).expect("xpopup: lock roundtrip failed");
+    queue
+        .roundtrip(&mut state)
+        .expect("xpopup: lock roundtrip failed");
 
     if state.lock_failed {
         eprintln!("xpopup: compositor refused session lock");
@@ -340,16 +366,14 @@ pub(crate) fn run_wayland_locked(
     queue.roundtrip(&mut state).unwrap(); // second roundtrip for any late events
     conn.flush().unwrap();
 
-    let configured: Vec<&SurfaceState> =
-        state.surfaces.iter().filter(|s| s.configured).collect();
+    let configured: Vec<&SurfaceState> = state.surfaces.iter().filter(|s| s.configured).collect();
     if configured.is_empty() {
         eprintln!("xpopup: no lock surfaces were configured");
         std::process::exit(1);
     }
 
     // --- Set up wgpu ---
-    let display_ptr: *mut std::ffi::c_void =
-        conn.backend().display_ptr() as *mut std::ffi::c_void;
+    let display_ptr: *mut std::ffi::c_void = conn.backend().display_ptr() as *mut std::ffi::c_void;
 
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
@@ -385,14 +409,13 @@ pub(crate) fn run_wayland_locked(
         };
 
         if device_queue.is_none() {
-            let adapter = pollster::block_on(instance.request_adapter(
-                &wgpu::RequestAdapterOptions {
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     compatible_surface: Some(&wgpu_surface),
                     power_preference: wgpu::PowerPreference::None,
                     force_fallback_adapter: false,
-                },
-            ))
-            .expect("xpopup: no wgpu adapter available");
+                }))
+                .expect("xpopup: no wgpu adapter available");
 
             let (device, queue) = pollster::block_on(adapter.request_device(
                 &wgpu::DeviceDescriptor {
@@ -498,12 +521,19 @@ pub(crate) fn run_wayland_locked(
                         continue;
                     }
                 };
-                let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let view = frame
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
                 let mut encoder =
                     device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
 
-                let extra_cmds =
-                    renderer.update_buffers(&device, &gpu_queue, &mut encoder, &clipped, &screen_desc);
+                let extra_cmds = renderer.update_buffers(
+                    &device,
+                    &gpu_queue,
+                    &mut encoder,
+                    &clipped,
+                    &screen_desc,
+                );
 
                 {
                     let mut rp = encoder
@@ -530,8 +560,11 @@ pub(crate) fn run_wayland_locked(
                     renderer.render(&mut rp, &clipped, &screen_desc);
                 }
 
-                gpu_queue
-                    .submit(extra_cmds.into_iter().chain(std::iter::once(encoder.finish())));
+                gpu_queue.submit(
+                    extra_cmds
+                        .into_iter()
+                        .chain(std::iter::once(encoder.finish())),
+                );
                 frame.present();
             }
 
@@ -551,7 +584,9 @@ pub(crate) fn run_wayland_locked(
         }
 
         // Poll for pending events without blocking so the countdown stays live.
-        queue.dispatch_pending(&mut state).expect("xpopup: Wayland dispatch failed");
+        queue
+            .dispatch_pending(&mut state)
+            .expect("xpopup: Wayland dispatch failed");
         conn.flush().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(250));
         state.needs_render = true;

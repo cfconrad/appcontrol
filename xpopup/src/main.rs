@@ -7,7 +7,8 @@ fn main() {
 
     // Strip known flags before positional args.
     let warn_only = args.iter().any(|a| a == "--warn-only");
-    let timeout_secs: Option<u64> = args.iter()
+    let timeout_secs: Option<u64> = args
+        .iter()
         .find_map(|a| a.strip_prefix("--timeout=").and_then(|v| v.parse().ok()));
     let positional: Vec<&String> = args
         .iter()

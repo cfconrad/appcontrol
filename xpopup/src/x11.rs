@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::ui::{popup_ui, PopupState};
+use crate::ui::{PopupState, popup_ui};
 
 /// Grab both keyboard and pointer on the currently focused X11 window.
 /// Returns the grabbed window ID on success, 0 on failure.
@@ -20,7 +20,13 @@ fn x11_grab_all() -> u32 {
 
     // Grab keyboard.
     let kb_ok = conn
-        .grab_keyboard(true, focus, Time::CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC)
+        .grab_keyboard(
+            true,
+            focus,
+            Time::CURRENT_TIME,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+        )
         .ok()
         .and_then(|c| c.reply().ok())
         .map(|r| r.status == GrabStatus::SUCCESS)
@@ -112,7 +118,15 @@ pub(crate) fn run_x11(
     eframe::run_native(
         "xpopup",
         options,
-        Box::new(|cc| Ok(Box::new(XPopup::new(cc, message, bg_image_path, warn_only, timeout_secs)))),
+        Box::new(|cc| {
+            Ok(Box::new(XPopup::new(
+                cc,
+                message,
+                bg_image_path,
+                warn_only,
+                timeout_secs,
+            )))
+        }),
     )
     .unwrap();
 }

@@ -112,7 +112,8 @@ impl QuizState {
         let idx = self.pool[self.rng.gen_range(0..self.pool.len())];
         self.current = idx;
         self.choices = make_choices(&self.entries, idx, &mut self.rng);
-        self.correct_idx = self.choices
+        self.correct_idx = self
+            .choices
             .iter()
             .position(|c| c == &self.entries[idx].correct)
             .unwrap_or(0);
@@ -124,11 +125,7 @@ impl QuizState {
         let correct = chosen_idx == self.correct_idx;
         if correct {
             let word = self.entries[self.current].word.clone();
-            let _ = progress::increment_correct(
-                &self.progress_conn,
-                &self.config.username,
-                &word,
-            );
+            let _ = progress::increment_correct(&self.progress_conn, &self.config.username, &word);
             let count = self.progress.entry(word).or_insert(0);
             *count += 1;
             self.score += 1;

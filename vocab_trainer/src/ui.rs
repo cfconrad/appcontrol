@@ -40,8 +40,8 @@ impl eframe::App for QuizApp {
                 self.state.flash = None;
                 if self.done_at.is_none() {
                     self.state.next_question();
-                    self.question_deadline = std::time::Instant::now()
-                        + Duration::from_secs(QUESTION_TIMEOUT_SECS);
+                    self.question_deadline =
+                        std::time::Instant::now() + Duration::from_secs(QUESTION_TIMEOUT_SECS);
                 }
             }
         }
@@ -155,40 +155,38 @@ impl eframe::App for QuizApp {
                         .num_columns(2)
                         .spacing([16.0, 16.0])
                         .show(ui, |ui| {
-                        for (i, choice) in choices.iter().enumerate() {
-                            let fill = if in_flash {
-                                if let Some((was_correct, chosen, _)) = flash {
-                                    if i == correct_idx {
-                                        egui::Color32::from_rgb(40, 180, 40) // always green
-                                    } else if !was_correct && i == chosen {
-                                        egui::Color32::from_rgb(180, 40, 40) // chosen wrong = red
+                            for (i, choice) in choices.iter().enumerate() {
+                                let fill = if in_flash {
+                                    if let Some((was_correct, chosen, _)) = flash {
+                                        if i == correct_idx {
+                                            egui::Color32::from_rgb(40, 180, 40) // always green
+                                        } else if !was_correct && i == chosen {
+                                            egui::Color32::from_rgb(180, 40, 40) // chosen wrong = red
+                                        } else {
+                                            egui::Color32::from_gray(50)
+                                        }
                                     } else {
                                         egui::Color32::from_gray(50)
                                     }
                                 } else {
-                                    egui::Color32::from_gray(50)
+                                    egui::Color32::from_gray(70)
+                                };
+
+                                let btn = egui::Button::new(egui::RichText::new(choice).size(24.0))
+                                    .min_size(btn_size)
+                                    .fill(fill);
+
+                                if ui.add_enabled(!in_flash, btn).clicked() {
+                                    let was_correct = self.state.answer(i);
+                                    if was_correct && self.state.score >= needed {
+                                        self.done_at = Some(std::time::Instant::now());
+                                    }
                                 }
-                            } else {
-                                egui::Color32::from_gray(70)
-                            };
 
-                            let btn = egui::Button::new(
-                                egui::RichText::new(choice).size(24.0),
-                            )
-                            .min_size(btn_size)
-                            .fill(fill);
-
-                            if ui.add_enabled(!in_flash, btn).clicked() {
-                                let was_correct = self.state.answer(i);
-                                if was_correct && self.state.score >= needed {
-                                    self.done_at = Some(std::time::Instant::now());
+                                if i % 2 == 1 {
+                                    ui.end_row();
                                 }
                             }
-
-                            if i % 2 == 1 {
-                                ui.end_row();
-                            }
-                        }
                         });
                 });
             });

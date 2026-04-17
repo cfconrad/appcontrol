@@ -1,6 +1,6 @@
+use log;
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
-use log;
 
 use crate::config::VocabRule;
 use crate::proc::{uid_to_home_dir, uid_to_username};
@@ -15,12 +15,10 @@ const REPEAT_SECS: u64 = 30;
 const DIALOG_TIMEOUT_SECS: u64 = 15;
 
 /// Per-uid notification counts (how many times the popup has been shown).
-static COUNTS: LazyLock<Mutex<HashMap<u32, u32>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static COUNTS: LazyLock<Mutex<HashMap<u32, u32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// PIDs that currently have an active notification loop.
-static ACTIVE_PIDS: LazyLock<Mutex<HashSet<u32>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+static ACTIVE_PIDS: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Show a notification popup for the given user with the supplied message.
 ///
@@ -143,14 +141,19 @@ fn show_dialog(uid: u32, app_pid: u32, message: &str, warn_only: bool) -> Dialog
             }
 
             // Call the xpopup library function
-            xpopup::run_popup(message.to_string(), None, warn_only, Some(DIALOG_TIMEOUT_SECS));
+            xpopup::run_popup(
+                message.to_string(),
+                None,
+                warn_only,
+                Some(DIALOG_TIMEOUT_SECS),
+            );
 
             // Should not be reached as run_popup calls process::exit
             libc::_exit(0);
         } else {
             // Parent process: poll for child exit, enforcing a dialog timeout.
-            let deadline = std::time::Instant::now()
-                + std::time::Duration::from_secs(DIALOG_TIMEOUT_SECS);
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(DIALOG_TIMEOUT_SECS);
 
             loop {
                 let mut status = 0;
@@ -256,7 +259,13 @@ fn get_user_gid(uid: u32) -> Option<u32> {
     let mut result: *mut libc::passwd = std::ptr::null_mut();
 
     let ret = unsafe {
-        libc::getpwuid_r(uid, pwd.as_mut_ptr(), buf.as_mut_ptr(), buf.len(), &mut result)
+        libc::getpwuid_r(
+            uid,
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
     };
 
     if ret != 0 || result.is_null() {
@@ -289,29 +298,17 @@ static ACTIVE_QUIZ_GROUPS: LazyLock<Mutex<HashSet<String>>> =
 /// If the user quits the quiz (exits 1), the regular `notify()` popup is shown instead.
 ///
 /// Returns immediately; the quiz loop runs in a background thread.
-pub fn vocab_quiz(
-    uid: u32,
-    pid: u32,
-    group_name: String,
-    rule: VocabRule,
-    config_db_path: String,
-    data_dir: String,
-) {
-    std::thread::spawn(move || {
-        run_quiz_loop(uid, pid, group_name, rule, config_db_path, data_dir)
-    });
+pub fn vocab_quiz(uid: u32, pid: u32, group_name: String, rule: VocabRule, config_db_path: String) {
+    std::thread::spawn(move || run_quiz_loop(uid, pid, group_name, rule, config_db_path));
 }
 
-fn run_quiz_loop(
-    uid: u32,
-    pid: u32,
-    group_name: String,
-    rule: VocabRule,
-    config_db_path: String,
-    data_dir: String,
-) {
+fn run_quiz_loop(uid: u32, pid: u32, group_name: String, rule: VocabRule, config_db_path: String) {
     // Only one quiz loop per group at a time.
-    if !ACTIVE_QUIZ_GROUPS.lock().unwrap().insert(group_name.clone()) {
+    if !ACTIVE_QUIZ_GROUPS
+        .lock()
+        .unwrap()
+        .insert(group_name.clone())
+    {
         log::debug!("vocab_quiz: loop already active for group {group_name:?}, skipping");
         return;
     }
@@ -337,12 +334,16 @@ fn run_quiz_loop(
         }
     };
     if already_used {
-        notify(uid, pid, "# Usage limit reached\n\nYou have reached your usage limit.\nThe vocabulary quiz has already been completed for this period.");
+        notify(
+            uid,
+            pid,
+            "# Usage limit reached\n\nYou have reached your usage limit.\nThe vocabulary quiz has already been completed for this period.",
+        );
         ACTIVE_QUIZ_GROUPS.lock().unwrap().remove(&group_name);
         return;
     }
 
-    let result = show_quiz(uid, &rule, &data_dir);
+    let result = show_quiz(uid, &rule);
 
     match result {
         QuizOutcome::Earned(earned_secs) => {
@@ -353,12 +354,9 @@ fn run_quiz_loop(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs() as i64;
-                    if let Err(e) = crate::config::insert_time_credit(
-                        &conn,
-                        rule.id,
-                        earned_secs,
-                        now,
-                    ) {
+                    if let Err(e) =
+                        crate::config::insert_time_credit(&conn, rule.id, earned_secs, now)
+                    {
                         eprintln!("appmon vocab_quiz: failed to record credit: {e}");
                     }
                 }
@@ -367,7 +365,11 @@ fn run_quiz_loop(
         }
         QuizOutcome::Quit => {
             // Fall back to the regular notification popup.
-            notify(uid, pid, "# Usage limit reached\n\nYou have reached your usage limit.\nClose the application or earn more time with the vocabulary quiz.");
+            notify(
+                uid,
+                pid,
+                "# Usage limit reached\n\nYou have reached your usage limit.\nClose the application or earn more time with the vocabulary quiz.",
+            );
         }
         QuizOutcome::Failed => {
             eprintln!("appmon vocab_quiz: quiz process failed for uid {uid}");
@@ -385,7 +387,7 @@ enum QuizOutcome {
 }
 
 /// Fork a child process, drop privileges, and run the vocabulary quiz.
-fn show_quiz(uid: u32, rule: &VocabRule, data_dir: &str) -> QuizOutcome {
+fn show_quiz(uid: u32, rule: &VocabRule) -> QuizOutcome {
     let env = match find_user_display_env(uid) {
         Some(e) => e,
         None => {

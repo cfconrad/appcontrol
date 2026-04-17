@@ -7,9 +7,9 @@ pub struct Whitelist {
 
 impl Whitelist {
     pub fn matches(&self, uid: u32, name: &str) -> bool {
-        self.entries.iter().any(|(entry_uid, re)| {
-            entry_uid.map_or(true, |u| u == uid) && re.is_match(name)
-        })
+        self.entries
+            .iter()
+            .any(|(entry_uid, re)| entry_uid.map_or(true, |u| u == uid) && re.is_match(name))
     }
 }
 
@@ -83,9 +83,8 @@ pub fn open_config_db(path: &str) -> Result<Connection> {
     )?;
     // Migrations for tables that predate these columns
     let _ = conn.execute_batch("ALTER TABLE whitelist ADD COLUMN uid INTEGER;");
-    let _ = conn.execute_batch(
-        "ALTER TABLE whitelist ADD COLUMN group_name TEXT NOT NULL DEFAULT '';",
-    );
+    let _ =
+        conn.execute_batch("ALTER TABLE whitelist ADD COLUMN group_name TEXT NOT NULL DEFAULT '';");
     let _ = conn.execute_batch(
         "ALTER TABLE vocab_rules ADD COLUMN reset_time TEXT NOT NULL DEFAULT 'daily';",
     );
@@ -140,9 +139,8 @@ pub fn open_config_db(path: &str) -> Result<Connection> {
 }
 
 pub fn list_rules(conn: &Connection) -> Result<Vec<Rule>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, group_name, reset_behavior, \"limit\" FROM rules ORDER BY id",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, group_name, reset_behavior, \"limit\" FROM rules ORDER BY id")?;
     let rules = stmt
         .query_map([], |row| {
             Ok(Rule {
@@ -169,18 +167,19 @@ pub fn set_rules(conn: &Connection, rules: &[Rule]) -> Result<()> {
 }
 
 pub fn load_whitelist(conn: &Connection) -> Whitelist {
-    let rows: Vec<(Option<u32>, String)> = match conn.prepare(
-        "SELECT uid, pattern FROM whitelist WHERE enabled = 1",
-    ) {
-        Err(e) => {
-            eprintln!("appmon: failed to query whitelist: {e}");
-            return Whitelist { entries: vec![] };
-        }
-        Ok(mut stmt) => stmt
-            .query_map([], |row| Ok((row.get::<_, Option<u32>>(0)?, row.get::<_, String>(1)?)))
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default(),
-    };
+    let rows: Vec<(Option<u32>, String)> =
+        match conn.prepare("SELECT uid, pattern FROM whitelist WHERE enabled = 1") {
+            Err(e) => {
+                eprintln!("appmon: failed to query whitelist: {e}");
+                return Whitelist { entries: vec![] };
+            }
+            Ok(mut stmt) => stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, Option<u32>>(0)?, row.get::<_, String>(1)?))
+                })
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default(),
+        };
 
     let entries = rows
         .into_iter()
@@ -197,9 +196,8 @@ pub fn load_whitelist(conn: &Connection) -> Whitelist {
 }
 
 pub fn list_whitelist_entries(conn: &Connection) -> Result<Vec<WhitelistEntry>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, uid, group_name, pattern, enabled FROM whitelist ORDER BY id",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, uid, group_name, pattern, enabled FROM whitelist ORDER BY id")?;
     let entries = stmt
         .query_map([], |row| {
             Ok(WhitelistEntry {
@@ -296,14 +294,22 @@ pub fn sum_credits_since(conn: &Connection, vocab_rule_id: i64, since: i64) -> R
 /// Returns the Unix timestamp of the start of the current reset period.
 pub fn period_start(now: i64, reset_time: &str) -> i64 {
     use chrono::{Datelike, TimeZone, Utc};
-    let dt = Utc.timestamp_opt(now, 0).single().expect("invalid timestamp");
+    let dt = Utc
+        .timestamp_opt(now, 0)
+        .single()
+        .expect("invalid timestamp");
     let start = match reset_time {
         "weekly" => {
             let monday = dt.date_naive()
                 - chrono::Duration::days(dt.weekday().num_days_from_monday() as i64);
             monday.and_hms_opt(0, 0, 0).unwrap()
         }
-        "monthly" => dt.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap(),
+        "monthly" => dt
+            .date_naive()
+            .with_day(1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap(),
         _ => dt.date_naive().and_hms_opt(0, 0, 0).unwrap(),
     };
     start.and_utc().timestamp()
