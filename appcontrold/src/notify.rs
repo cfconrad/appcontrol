@@ -3,7 +3,7 @@ use std::sync::{LazyLock, Mutex};
 use log;
 
 use crate::config::VocabRule;
-use crate::proc::uid_to_username;
+use crate::proc::{uid_to_home_dir, uid_to_username};
 
 /// Number of times a uid can click "Ok" before only "Close Application" remains.
 const WARN_LIMIT: u32 = 3;
@@ -396,7 +396,8 @@ fn show_quiz(uid: u32, rule: &VocabRule, data_dir: &str) -> QuizOutcome {
 
     let gid = get_user_gid(uid).unwrap_or(uid);
     let username = uid_to_username(uid).unwrap_or_else(|| uid.to_string());
-    let progress_db = format!("/tmp/vocab_progress_{uid}.db");
+    let home = uid_to_home_dir(uid).unwrap_or_else(|| format!("/tmp/appcontrol_uid_{uid}"));
+    let progress_db = format!("{home}/.local/share/appcontrol/vocab_progress.db");
 
     let config = vocab_trainer::QuizConfig {
         correct_needed: rule.correct_needed as u32,

@@ -38,6 +38,30 @@ pub fn uid_to_username(uid: u32) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+pub fn uid_to_home_dir(uid: u32) -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; pw_buf_size()];
+    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+
+    let ret = unsafe {
+        libc::getpwuid_r(uid, pwd.as_mut_ptr(), buf.as_mut_ptr(), buf.len(), &mut result)
+    };
+
+    if ret != 0 || result.is_null() {
+        return None;
+    }
+
+    let dir_ptr = unsafe { pwd.assume_init().pw_dir };
+    if dir_ptr.is_null() {
+        return None;
+    }
+
+    unsafe { std::ffi::CStr::from_ptr(dir_ptr) }
+        .to_str()
+        .ok()
+        .map(|s| s.to_string())
+}
+
 pub fn username_to_uid(name: &str) -> Option<u32> {
     let c_name = std::ffi::CString::new(name).ok()?;
     let mut buf = vec![0 as libc::c_char; pw_buf_size()];

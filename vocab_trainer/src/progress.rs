@@ -4,6 +4,9 @@ use rusqlite::{params, Connection, Result};
 
 /// Open (or create) the progress database at `path`.
 pub fn open_progress_db(path: &str) -> Result<Connection> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let conn = Connection::open(path)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS word_progress (

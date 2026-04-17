@@ -1131,8 +1131,10 @@ fn cmd_vocab_rules_edit(data_dir: &std::path::Path) {
 // vocab list / edit (progress per user)
 // ---------------------------------------------------------------------------
 
-fn progress_db_path(data_dir: &std::path::Path, uid: u32) -> String {
-    format!("/tmp/vocab_progress_{uid}.db")
+fn progress_db_path(_data_dir: &std::path::Path, uid: u32) -> String {
+    let home = proc::uid_to_home_dir(uid)
+        .unwrap_or_else(|| format!("/tmp/appcontrol_uid_{uid}"));
+    format!("{home}/.local/share/appcontrol/vocab_progress.db")
 }
 
 fn cmd_vocab_list(data_dir: &std::path::Path, username: &str) {
