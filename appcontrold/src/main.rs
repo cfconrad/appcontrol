@@ -48,9 +48,9 @@ enum Command {
     /// Run the monitoring daemon (default)
     Serve,
     /// Manage monitor configuration
-    Config(ConfigArgs),
+    AppMapping(AppMappingArgs),
     /// Inspect tracked processes
-    Proc(ProcArgs),
+    Ps(PsArgs),
     /// Manage usage rules
     Rules(RulesArgs),
     /// Manage vocabulary quiz progress
@@ -58,7 +58,7 @@ enum Command {
 }
 
 #[derive(Args)]
-struct ConfigArgs {
+struct AppMappingArgs {
     #[command(subcommand)]
     subcommand: ConfigCommand,
 }
@@ -72,7 +72,7 @@ enum ConfigCommand {
 }
 
 #[derive(Args)]
-struct ProcArgs {
+struct PsArgs {
     #[command(subcommand)]
     subcommand: ProcCommand,
 }
@@ -1296,11 +1296,11 @@ fn main() {
     let data_dir = &cli.data_dir;
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => cmd_serve(data_dir),
-        Command::Config(args) => match args.subcommand {
+        Command::AppMapping(args) => match args.subcommand {
             ConfigCommand::Show => cmd_config_show(data_dir),
             ConfigCommand::Edit => cmd_config_edit(data_dir),
         },
-        Command::Proc(args) => match args.subcommand {
+        Command::Ps(args) => match args.subcommand {
             ProcCommand::List(list_args) => match list_args.subcommand {
                 ListCommand::Current => cmd_proc_list(data_dir),
                 ListCommand::Today => cmd_proc_list_today(data_dir),
